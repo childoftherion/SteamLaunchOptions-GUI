@@ -1,16 +1,45 @@
+# Import necessary libraries
 import gi
-gi.require_version("Gtk", "3.0")
-from gi.repository import Gtk, Gdk
+# Ensure Gtk 3.0 is available
+try:
+    gi.require_version("Gtk", "3.0")
+    from gi.repository import Gtk, Gdk, GLib  # Added GLib for idle_add
+except ValueError as e:
+    print(f"Error importing GTK 3.0: {e}")
+    print("Please ensure you have the GTK 3.0 development libraries installed.")
+    print("On Debian/Ubuntu: sudo apt-get install libgtk-3-dev python3-gi python3-gi-cairo gir1.2-gtk-3.0")
+    print("On Fedora: sudo dnf install gtk3-devel python3-gobject python3-cairo")
+    print("On Arch Linux: sudo pacman -S gtk3 python-gobject")
+    exit(1)
+
 import subprocess
 import os
 import json
-import pexpect
+import shlex  # For parsing custom arguments
+import pexpect  # User's original code uses pexpect for sudo password
+import logging  # For debugging
+from collections import defaultdict
 
-# Configuration for all tabs
+# SECTION: CONSTANTS
+SETTINGS_FILE = "steam_launcher_settings.json"
+LOG_FILE = 'steam_launcher.log'
+
+# SECTION: LOGGING SETUP
+# Configure logging to debug issues with detection
+logging.basicConfig(
+    filename=LOG_FILE,
+    level=logging.DEBUG,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logging.info("Steam Launcher application started.")
+
+# SECTION: TAB CONFIGURATIONS
+# Define configuration for all tabs (e.g., Wine, MangoHud, etc.)
 TAB_CONFIGS = {
     "Wine": {
         "enable_label": "Enable Wine",
         "enable_tooltip": "Enable Wine environment settings",
+        "env_prefix": "",  # Wine env vars don't have a common prefix like WINE_
         "toggles": [
             ("WINEESYNC", "Enable explicit synchronization for Wine"),
             ("WINEFSYNC", "Enable frame synchronization for Wine"),
@@ -20,7 +49,7 @@ TAB_CONFIGS = {
         "inputs": [
             ("WINEPREFIX", "Path to Wine prefix", "e.g., /path/to/prefix"),
             ("WINEARCH", "Set Wine architecture", "e.g., win32"),
-            ("WINEDLLOVERRIDES", "Override specific DLLs", "e.g., dinput8=n,b"),
+            ("WINEDLLOVERRIDES", "Override specific DLLs", "e.g., dxgi=n,b"),
             ("WINEDEBUG", "Set Wine debug level", "e.g., +relay"),
             ("WINELOGFILE", "Path to Wine log file", "e.g., /path/to/logfile"),
             ("WINESERVER", "Path to wineserver binary", "e.g., /path/to/wineserver"),
@@ -32,6 +61,8 @@ TAB_CONFIGS = {
     "MangoHud": {
         "enable_label": "Enable MangoHud",
         "enable_tooltip": "Enable MangoHud overlay",
+        "env_prefix": "",  # MangoHud env vars don't have a common prefix like MANGOHUD_
+        "command_prefix": "mangohud",  # Command to prepend
         "toggles": [
             ("MANGOHUD", "Enable MangoHud overlay"),
             ("MANGOHUD_DLSYM", "Use dlsym to load MangoHud"),
@@ -49,20 +80,20 @@ TAB_CONFIGS = {
             ("MANGOHUD_POWER", "Display GPU power usage in MangoHud"),
         ],
         "inputs": [
-            ("CONFIG", "Path to custom MangoHud config file", "e.g., /path/to/config"),
-            ("FPSAVERAGE", "Average FPS over frames", "e.g., 100"),
-            ("FPS_LIMIT", "Set frame rate limit", "e.g., 60"),
-            ("FPS_THRESHOLD", "Set FPS alert threshold", "e.g., 30"),
-            ("COLOR", "Set overlay color", "e.g., #FF0000"),
-            ("XOFFSET", "Adjust X offset of overlay", "e.g., 10"),
-            ("YOFFSET", "Adjust Y offset of overlay", "e.g., 10"),
+            ("MANGOHUD_CONFIG", "Path to custom MangoHud config file", "e.g., /path/to/config"),
+            ("MANGOHUD_FPSAVERAGE", "Average FPS over frames", "e.g., 100"),
+            ("MANGOHUD_FPS_LIMIT", "Set frame rate limit", "e.g., 60"),
+            ("MANGOHUD_FPS_THRESHOLD", "Set FPS alert threshold", "e.g., 30"),
+            ("MANGOHUD_COLOR", "Set overlay color", "e.g., #FF0000"),
+            ("MANGOHUD_XOFFSET", "Adjust X offset of overlay", "e.g., 10"),
+            ("MANGOHUD_YOFFSET", "Adjust Y offset of overlay", "e.g., 10"),
         ],
         "dropdowns": {
-            "ALIGN": {
+            "MANGOHUD_ALIGN": {
                 "label": "ALIGN:",
                 "options": ["bottom", "top", "left", "right"],
                 "tooltip": "Align the MangoHud overlay",
-                "default": "bottom",
+                "default": "top",
             }
         },
         "software_requirement": "mangohud",
@@ -70,6 +101,7 @@ TAB_CONFIGS = {
     "vkBasalt": {
         "enable_label": "Enable vkBasalt",
         "enable_tooltip": "Enable vkBasalt effects",
+        "env_prefix": "",  # vkBasalt env vars don't have a common prefix like VK_BASALT_
         "toggles": [
             ("VK_BASALT_DISABLE", "Disable vkBasalt effects"),
             ("VK_BASALT_SHARPEN", "Enable sharpening effect"),
@@ -88,83 +120,87 @@ TAB_CONFIGS = {
             ("VK_BASALT_MOTION_BLUR", "Enable motion blur"),
         ],
         "inputs": [
-            ("CONFIG", "Path to custom vkBasalt config file", "e.g., /path/to/config"),
-            ("SHADERS", "Path to custom shaders", "e.g., /path/to/shaders"),
+            ("VK_BASALT_CONFIG", "Path to custom vkBasalt config file", "e.g., /path/to/config"),
+            ("VK_BASALT_SHADERS", "Path to custom shaders", "e.g., /path/to/shaders"),
+            ("AMD_VULKAN_ICD", "Force specific AMD Vulkan ICD", "e.g., RADV"),
+            ("RADV_PERFTEST", "Set RADV performance tests", "e.g., rt,gpl"),
+            ("RADV_DEBUG", "Set RADV debug options", "e.g., shader"),
+            ("VKD3D_CONFIG", "Set VKD3D config options", "e.g., dxr12"),
         ],
         "sliders": [
-            ("SHARPEN_STRENGTH", "Sharpening strength", 0.0, 1.0),
-            ("FXAA_STRENGTH", "FXAA strength", 0.0, 1.0),
-            ("SMAA_STRENGTH", "SMAA strength", 0.0, 1.0),
-            ("LUT_STRENGTH", "LUT strength", 0.0, 1.0),
-            ("TONEMAP_STRENGTH", "Tonemapping strength", 0.0, 1.0),
-            ("HDR_STRENGTH", "HDR strength", 0.0, 1.0),
-            ("DITHER_STRENGTH", "Dithering strength", 0.0, 1.0),
-            ("LUMINANCE_STRENGTH", "Luminance strength", 0.0, 1.0),
-            ("COLOR_STRENGTH", "Color strength", 0.0, 1.0),
-            ("BLOOM_STRENGTH", "Bloom strength", 0.0, 1.0),
-            ("SSAO_STRENGTH", "SSAO strength", 0.0, 1.0),
-            ("VIGNETTE_STRENGTH", "Vignette strength", 0.0, 1.0),
-            ("CHROMATIC_ABER_STRENGTH", "Chromatic aberration strength", 0.0, 1.0),
-            ("MOTION_BLUR_STRENGTH", "Motion blur strength", 0.0, 1.0),
-            ("SHARPEN_RADIUS", "Sharpening radius", 0.0, 10.0),
-            ("FXAA_RADIUS", "FXAA radius", 0.0, 10.0),
-            ("SMAA_RADIUS", "SMAA radius", 0.0, 10.0),
-            ("LUT_RADIUS", "LUT radius", 0.0, 10.0),
-            ("TONEMAP_RADIUS", "Tonemapping radius", 0.0, 10.0),
-            ("HDR_RADIUS", "HDR radius", 0.0, 10.0),
-            ("DITHER_RADIUS", "Dithering radius", 0.0, 10.0),
-            ("LUMINANCE_RADIUS", "Luminance radius", 0.0, 10.0),
-            ("COLOR_RADIUS", "Color radius", 0.0, 10.0),
-            ("BLOOM_RADIUS", "Bloom radius", 0.0, 10.0),
-            ("SSAO_RADIUS", "SSAO radius", 0.0, 10.0),
-            ("VIGNETTE_RADIUS", "Vignette radius", 0.0, 10.0),
-            ("CHROMATIC_ABER_RADIUS", "Chromatic aberration radius", 0.0, 10.0),
-            ("MOTION_BLUR_RADIUS", "Motion blur radius", 0.0, 10.0),
+            ("VK_BASALT_SHARPEN_STRENGTH", "Sharpening strength", 0.0, 1.0),
+            ("VK_BASALT_FXAA_STRENGTH", "FXAA strength", 0.0, 1.0),
+            ("VK_BASALT_SMAA_STRENGTH", "SMAA strength", 0.0, 1.0),
+            ("VK_BASALT_LUT_STRENGTH", "LUT strength", 0.0, 1.0),
+            ("VK_BASALT_TONEMAP_STRENGTH", "Tonemapping strength", 0.0, 1.0),
+            ("VK_BASALT_HDR_STRENGTH", "HDR strength", 0.0, 1.0),
+            ("VK_BASALT_DITHER_STRENGTH", "Dithering strength", 0.0, 1.0),
+            ("VK_BASALT_LUMINANCE_STRENGTH", "Luminance strength", 0.0, 1.0),
+            ("VK_BASALT_COLOR_STRENGTH", "Color strength", 0.0, 1.0),
+            ("VK_BASALT_BLOOM_STRENGTH", "Bloom strength", 0.0, 1.0),
+            ("VK_BASALT_SSAO_STRENGTH", "SSAO strength", 0.0, 1.0),
+            ("VK_BASALT_VIGNETTE_STRENGTH", "Vignette strength", 0.0, 1.0),
+            ("VK_BASALT_CHROMATIC_ABER_STRENGTH", "Chromatic aberration strength", 0.0, 1.0),
+            ("VK_BASALT_MOTION_BLUR_STRENGTH", "Motion blur strength", 0.0, 1.0),
+            ("VK_BASALT_SHARPEN_RADIUS", "Sharpening radius", 0.0, 10.0),
+            ("VK_BASALT_FXAA_RADIUS", "FXAA radius", 0.0, 10.0),
+            ("VK_BASALT_SMAA_RADIUS", "SMAA radius", 0.0, 10.0),
+            ("VK_BASALT_LUT_RADIUS", "LUT radius", 0.0, 10.0),
+            ("VK_BASALT_TONEMAP_RADIUS", "Tonemapping radius", 0.0, 10.0),
+            ("VK_BASALT_HDR_RADIUS", "HDR radius", 0.0, 10.0),
+            ("VK_BASALT_DITHER_RADIUS", "Dithering radius", 0.0, 10.0),
+            ("VK_BASALT_LUMINANCE_RADIUS", "Luminance radius", 0.0, 10.0),
+            ("VK_BASALT_COLOR_RADIUS", "Color radius", 0.0, 10.0),
+            ("VK_BASALT_BLOOM_RADIUS", "Bloom radius", 0.0, 10.0),
+            ("VK_BASALT_SSAO_RADIUS", "SSAO radius", 0.0, 10.0),
+            ("VK_BASALT_VIGNETTE_RADIUS", "Vignette radius", 0.0, 10.0),
+            ("VK_BASALT_CHROMATIC_ABER_RADIUS", "Chromatic aberration radius", 0.0, 10.0),
+            ("VK_BASALT_MOTION_BLUR_RADIUS", "Motion blur radius", 0.0, 10.0),
         ],
         "software_requirement": "vkbasalt",
     },
     "GameMode": {
         "enable_label": "Enable GameMode",
         "enable_tooltip": "Enable GameMode optimization",
+        "command_prefix": "gamemoderun",
         "toggles": [
             ("GAME_MODE", "Enable GameMode optimization"),
         ],
+        "inputs": [],
         "software_requirement": "gamemoded",
     },
     "Gamescope": {
         "enable_label": "Enable Gamescope",
         "enable_tooltip": "Enable Gamescope",
+        "command_prefix": "gamescope",
+        "command_suffix": "--",
         "toggles": [
-            ("f", "Force full screen mode"),
-            ("b", "Enable borderless window mode"),
-            ("n", "Disable the gamescope compositor"),
-            ("c", "Enable VSync"),
-            ("q", "Enable quiet mode"),
+            ("-f", "Force full screen mode"),
+            ("-b", "Enable borderless window mode"),
+            ("-n", "Disable the gamescope compositor"),
+            ("-c", "Enable VSync"),
+            ("-q", "Enable quiet mode"),
         ],
         "inputs": [
-            ("W", "Set window width", "e.g., 1920"),
-            ("H", "Set window height", "e.g., 1080"),
-            ("r", "Set refresh rate", "e.g., 60"),
-            ("s", "Set game width", "e.g., 1920"),
-            ("t", "Set game height", "e.g., 1080"),
-            ("d", "Specify display", "e.g., :0"),
-            ("p", "Specify port", "e.g., 8080"),
-            ("x", "Set X offset", "e.g., 10"),
-            ("y", "Set Y offset", "e.g., 10"),
+            ("-W", "Set window width", "e.g., 1920"),
+            ("-H", "Set window height", "e.g., 1080"),
+            ("-r", "Set refresh rate", "e.g., 60"),
+            ("-w", "Set game width", "e.g., 1920"),
+            ("-h", "Set game height", "e.g., 1080"),
+            ("-d", "Specify display", "e.g., :0"),
+            ("-p", "Specify port", "e.g., 8080"),
+            ("-x", "Set X offset", "e.g., 10"),
+            ("-y", "Set Y offset", "e.g., 10"),
+            ("--prefer-vk-device", "Prefer specific Vulkan device", "e.g., 0"),
+            ("--steam", "Enable Steam integration features", ""),
         ],
-        "dropdowns": {
-            "inputs": {
-                "label": "Inputs:",
-                "options": ["None", "Keyboard", "Mouse", "Gamepad", "All"],
-                "tooltip": "Enable specific input types",
-                "default": "None",
-            }
-        },
+        "dropdowns": {},
         "software_requirement": "gamescope",
     },
     "DXVK": {
         "enable_label": "Enable DXVK",
         "enable_tooltip": "Enable DXVK translation",
+        "env_prefix": "",
         "toggles": [
             ("DXVK_HUD", "Enable DXVK HUD"),
             ("DXVK_ASYNC", "Enable asynchronous shader compilation"),
@@ -194,21 +230,22 @@ TAB_CONFIGS = {
             ("DXVK_ENABLE_SHADER_PREOPTIMIZEALL", "Enable shader preoptimize for all"),
         ],
         "inputs": [
-            ("HUD", "Specify HUD info", "e.g., fps,version"),
-            ("STATE_CACHE_PATH", "Path to state cache", "e.g., /path/to/cache"),
-            ("SHADER_CACHE_PATH", "Path to shader cache", "e.g., /path/to/cache"),
-            ("LOG_LEVEL", "Set log level", "e.g., info"),
-            ("MAX_FRAME_LATENCY", "Set max frame latency", "e.g., 2"),
-            ("MAX_FRAMES_IN_FLIGHT", "Set max frames in flight", "e.g., 3"),
-            ("FORCE_FEATURE_LEVEL", "Force feature level", "e.g., 11_0"),
-            ("SHADER_MODEL", "Specify shader model", "e.g., 5"),
-            ("MAX_SHADER_RESOURCE_GROUPS", "Set max shader resource groups", "e.g., 16"),
+            ("DXVK_HUD", "Specify HUD info", "e.g., fps,version"),
+            ("DXVK_STATE_CACHE_PATH", "Path to state cache", "e.g., /path/to/cache"),
+            ("DXVK_SHADER_CACHE_PATH", "Path to shader cache", "e.g., /path/to/cache"),
+            ("DXVK_LOG_LEVEL", "Set log level", "e.g., info"),
+            ("DXVK_MAX_FRAME_LATENCY", "Set max frame latency", "e.g., 2"),
+            ("DXVK_MAX_FRAMES_IN_FLIGHT", "Set max frames in flight", "e.g., 3"),
+            ("DXVK_FORCE_FEATURE_LEVEL", "Force feature level", "e.g., 11_0"),
+            ("DXVK_SHADER_MODEL", "Specify shader model", "e.g., 5"),
+            ("DXVK_MAX_SHADER_RESOURCE_GROUPS", "Set max shader resource groups", "e.g., 16"),
         ],
         "software_requirement": "dxvk",
     },
     "ProtonCustom": {
         "enable_label": "Enable ProtonCustom",
         "enable_tooltip": "Enable custom Proton settings",
+        "env_prefix": "",
         "toggles": [
             ("PROTON_USE_WINED3D", "Force use of WineD3D"),
             ("PROTON_NO_ESYNC", "Disable explicit synchronization"),
@@ -250,15 +287,19 @@ TAB_CONFIGS = {
             ("PROTON_USE_DSOUND_ALC_REVERB", "Enable reverb in DirectSound ALC"),
             ("PROTON_USE_DSOUND_ALC_3D", "Enable 3D audio in DirectSound ALC"),
             ("PROTON_USE_DSOUND_ALC_EAX", "Enable EAX in DirectSound ALC"),
+            ("PROTON_FORCE_VKLAYER_ENABLES", "Force Vulkan layer enables"),
+            ("PROTON_WAIT_FOR_PLAY", "Wait for steam 'Play' press"),
         ],
         "inputs": [
-            ("LOG_FILE", "Path to log file", "e.g., /path/to/log"),
-            ("USE_WINEDEBUG", "Set Wine debug level", "e.g., +all"),
+            ("PROTON_LOG_DIR", "Path to log directory", "e.g., /path/to/log"),
+            ("PROTON_DUMP_DEBUG_COMMANDS", "Path to dump debug commands", "e.g., /tmp/proton_debug"),
+            ("PROTON_WINE_DEBUG", "Set Wine debug level (e.g., +steam)", "e.g., +steam,+rpc"),
         ],
     },
     "MesaOverlay": {
         "enable_label": "Enable MesaOverlay",
         "enable_tooltip": "Enable Mesa overlay",
+        "env_prefix": "",
         "toggles": [
             ("MESA_OVERLAY", "Enable Mesa overlay"),
             ("MESA_OVERLAY_FPS", "Display FPS in Mesa overlay"),
@@ -274,16 +315,16 @@ TAB_CONFIGS = {
             ("MESA_OVERLAY_TRANSPARENT", "Make overlay transparent"),
         ],
         "inputs": [
-            ("CONFIG", "Path to custom Mesa overlay config file", "e.g., /path/to/config"),
-            ("XOFFSET", "Adjust X offset of overlay", "e.g., 10"),
-            ("YOFFSET", "Adjust Y offset of overlay", "e.g., 10"),
-            ("COLOR", "Set overlay color", "e.g., #FF0000"),
-            ("FONT_SIZE", "Set font size", "e.g., 12"),
-            ("LOG_FILE", "Path to log file", "e.g., /path/to/log"),
-            ("Transparency", "Set transparency level", "e.g., 0.5"),
+            ("MESA_OVERLAY_CONFIG", "Path to custom Mesa overlay config file", "e.g., /path/to/config"),
+            ("MESA_OVERLAY_XOFFSET", "Adjust X offset of overlay", "e.g., 10"),
+            ("MESA_OVERLAY_YOFFSET", "Adjust Y offset of overlay", "e.g., 10"),
+            ("MESA_OVERLAY_COLOR", "Set overlay color", "e.g., #FF0000"),
+            ("MESA_OVERLAY_FONT_SIZE", "Set font size", "e.g., 12"),
+            ("MESA_OVERLAY_LOG_FILE", "Path to log file", "e.g., /path/to/log"),
+            ("MESA_OVERLAY_TRANSPARENCY", "Set transparency level", "e.g., 0.5"),
         ],
         "dropdowns": {
-            "ALIGN": {
+            "MESA_OVERLAY_ALIGN": {
                 "label": "ALIGN:",
                 "options": ["top", "bottom", "left", "right"],
                 "tooltip": "Align the Mesa overlay",
@@ -293,122 +334,162 @@ TAB_CONFIGS = {
     },
 }
 
+# SECTION: GENERAL OPTIONS
+# Define options specific to the General tab (These are command-line flags starting with -)
 GENERAL_OPTIONS = [
-    ("NoHLTV", "Disables HLTV functionality"),
-    ("NoVid", "Skips the intro video"),
-    ("Console", "Opens the game console"),
-    ("Steam", "Forces Steam integration"),
-    ("NoSteamController", "Disables Steam controller input"),
-    ("NoJoy", "Disables joystick input"),
-    ("NoSound", "Disables sound"),
-    ("NoVSync", "Disables vertical sync"),
-    ("Fullscreen", "Forces fullscreen mode"),
-    ("Window", "Forces windowed mode"),
-    ("NoBorder", "Removes window borders in windowed mode"),
-    ("SafeMode", "Starts the game in safe mode"),
-    ("High", "Sets high priority"),
-    ("Low", "Sets low priority"),
-    ("Mid", "Sets medium priority"),
-    ("NoBenchmark", "Disables benchmarking"),
-    ("NoSplash", "Disables the splash screen"),
-    ("NoLogo", "Disables the logo screen"),
-    ("NoIPX", "Disables IPX networking"),
-    ("NoIP", "Disables IP networking"),
-    ("NoVoice", "Disables voice chat"),
-    ("NoCloud", "Disables Steam Cloud sync"),
-    ("NoHTTP", "Disables HTTP networking"),
-    ("NoSteamUpdate", "Disables Steam updates"),
-    ("NoSoundInit", "Disables sound initialization"),
-    ("NoCrashDialog", "Disables the crash dialog"),
-    ("NoCrashDump", "Disables crash dumps"),
-    ("NoAsserts", "Disables assertions"),
-    ("NoHomeDirFixup", "Disables home directory fixup"),
-    ("NoAutoCloud", "Disables automatic Steam Cloud sync"),
-    ("NoAutoJoystick", "Disables automatic joystick detection"),
-    ("NoMiniDumps", "Disables mini dumps"),
-    ("NoCache", "Disables caching"),
-    ("NoAsync", "Disables asynchronous operations"),
-    ("NoHW", "Disables hardware rendering"),
-    ("Soft", "Forces software rendering"),
-    ("NoGrab", "Disables mouse grabbing"),
-    ("NoGamepad", "Disables gamepad input"),
-    ("NoXInput", "Disables XInput"),
-    ("NoGPUWatch", "Disables GPU watch"),
-    ("NoCursor", "Disables cursor"),
-    ("NoHWCursor", "Disables hardware cursor"),
-    ("NoGL", "Disables OpenGL"),
-    ("NoD3D9", "Disables Direct3D 9"),
-    ("NoD3D11", "Disables Direct3D 11"),
-    ("NoMouse", "Disables mouse input"),
-    ("NoKB", "Disables keyboard input"),
-    ("NoLock", "Disables locking"),
-    ("NoCommand", "Disables command execution"),
-    ("NoLog", "Disables logging"),
-    ("NoProfile", "Disables user profile loading"),
-    ("NoRestart", "Disables automatic restart"),
-    ("NoUpdate", "Disables automatic updates"),
-    ("NoShip", "Disables ship mode"),
-    ("NoShaderCache", "Disables shader cache"),
-    ("NoShaderCompile", "Disables shader compilation"),
-    ("NoShaderLoad", "Disables shader loading"),
-    ("NoShaderPrecompile", "Disables shader precompilation"),
-    ("NoShaderPrecache", "Disables shader precache"),
-    ("NoShaderPreload", "Disables shader preload"),
-    ("NoShaderPrewarm", "Disables shader prewarm"),
-    ("NoShaderPreoptimize", "Disables shader preoptimize"),
-    ("NoShaderPrecompileAll", "Disables shader precompile for all"),
-    ("NoShaderPrecacheAll", "Disables shader precache for all"),
-    ("NoShaderPreloadAll", "Disables shader preload for all"),
-    ("NoShaderPrewarmAll", "Disables shader prewarm for all"),
-    ("NoShaderPreoptimizeAll", "Disables shader preoptimize for all"),
+    ("-nohltv", "Disables HLTV functionality"),
+    ("-novid", "Skips the intro video"),
+    ("-console", "Opens the game console"),
+    ("-steam", "Forces Steam integration"),
+    ("-nosteamcontroller", "Disables Steam controller input"),
+    ("-nojoy", "Disables joystick input"),
+    ("-nosound", "Disables sound"),
+    ("-novsync", "Disables vertical sync"),
+    ("-fullscreen", "Forces fullscreen mode"),
+    ("-windowed", "Forces windowed mode"),
+    ("-noborder", "Removes window borders in windowed mode"),
+    ("-safe", "Starts the game in safe mode"),
+    ("-high", "Sets high priority"),
+    ("-low", "Sets low priority"),
+    ("-mid", "Sets medium priority"),
+    ("-nobenchmark", "Disables benchmarking"),
+    ("-nosplash", "Disables the splash screen"),
+    ("-nologo", "Disables the logo screen"),
+    ("-noipx", "Disables IPX networking"),
+    ("-noip", "Disables IP networking"),
+    ("-novoice", "Disables voice chat"),
+    ("-nocloud", "Disables Steam Cloud sync"),
+    ("-nohttp", "Disables HTTP networking"),
+    ("-nosteamupdate", "Disables Steam updates"),
+    ("-nosoundinit", "Disables sound initialization"),
+    ("-nocrashdialog", "Disables the crash dialog"),
+    ("-nocrashdump", "Disables crash dumps"),
+    ("-noasserts", "Disables assertions"),
+    ("-nohomedirfixup", "Disables home directory fixup"),
+    ("-noautocloud", "Disables automatic Steam Cloud sync"),
+    ("-noautojoystick", "Disables automatic joystick detection"),
+    ("-nominidumps", "Disables mini dumps"),
+    ("-nocache", "Disables caching"),
+    ("-noasync", "Disables asynchronous operations"),
+    ("-nohw", "Disables hardware rendering"),
+    ("-soft", "Forces software rendering"),
+    ("-nograb", "Disables mouse grabbing"),
+    ("-nogamepad", "Disables gamepad input"),
+    ("-noxinput", "Disables XInput"),
+    ("-nogpuwatch", "Disables GPU watch"),
+    ("-nocursor", "Disables cursor"),
+    ("-nohwcursor", "Disables hardware cursor"),
+    ("-nogl", "Disables OpenGL"),
+    ("-nod3d9", "Disables Direct3D 9"),
+    ("-nod3d11", "Disables Direct3D 11"),
+    ("-nomouse", "Disables mouse input"),
+    ("-nokb", "Disables keyboard input"),
+    ("-nolock", "Disables locking"),
+    ("-nocommand", "Disables command execution"),
+    ("-nolog", "Disables logging"),
+    ("-noprofile", "Disables user profile loading"),
+    ("-norestart", "Disables automatic restart"),
+    ("-noupdate", "Disables automatic updates"),
+    ("-noship", "Disables ship mode"),
+    ("-noshadercache", "Disables shader cache"),
+    ("-noshadercompile", "Disables shader compilation"),
+    ("-noshaderload", "Disables shader loading"),
+    ("-noshaderprecompile", "Disables shader precompilation"),
+    ("-noshaderprecache", "Disables shader precache"),
+    ("-noshaderpreload", "Disables shader preload"),
+    ("-noshaderprewarm", "Disables shader prewarm"),
+    ("-noshaderpreoptimize", "Disables shader preoptimize"),
+    ("-noshaderprecompileall", "Disables shader precompile for all"),
+    ("-noshaderprecacheall", "Disables shader precache for all"),
+    ("-noshaderpreloadall", "Disables shader preload for all"),
+    ("-noshaderprewarmall", "Disables shader prewarm for all"),
+    ("-noshaderpreoptimizeall", "Disables shader preoptimize for all"),
 ]
 
+# SECTION: GENERAL INPUTS
+# Define input fields specific to the General tab (These are command-line flags with values)
 GENERAL_INPUTS = [
-    ("Width", "Sets the window width", "e.g., 1920"),
-    ("Height", "Sets the window height", "e.g., 1080"),
-    ("DXLevel", "Sets the DirectX level", "e.g., 95"),
-    ("Particles", "Sets the particle effect quality", "e.g., 1"),
-    ("Refresh", "Sets the refresh rate", "e.g., 60"),
+    ("-width", "Sets the window width", "e.g., 1920"),
+    ("-height", "Sets the window height", "e.g., 1080"),
+    ("-dxlevel", "Sets the DirectX level", "e.g., 95"),
+    ("-particles", "Sets the particle effect quality", "e.g., 1"),
+    ("-refresh", "Sets the refresh rate", "e.g., 60"),
+    ("-heapsize", "Sets heapsize in KB", "e.g., 524288"),
 ]
 
-DX_LEVEL_PRESETS = ["9.0", "9.0c", "10.0", "10.1", "11.0"]
+# SECTION: DX LEVEL PRESETS
+# Define preset options for DXLevel (expanded)
+DX_LEVEL_PRESETS = [
+    "80", "81", "90", "95", "98",
+    "9.0", "9.0c", "10.0", "10.1", "11.0",
+    "12.0",
+]
 
+# SECTION: MAIN WINDOW CLASS
+# Define the main window class for the Steam Launcher
 class SteamLauncherWindow(Gtk.Window):
+    # SECTION: INITIALIZATION
+    # Initialize the main window and set up UI components
     def __init__(self):
         super().__init__(title="Steam Game Launcher")
         self.set_border_width(10)
-        self.set_default_size(1280, 720)
+        self.set_default_size(1000, 700)
 
-        # Main vertical box
+        # Main vertical box to hold all content
         vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
         self.add(vbox)
 
-        # Header label
+        # Header label with title and description
         header = Gtk.Label(label="Steam Launch Options\nCustomize your game launch command with tabs for overlays and enhancements")
         header.set_justify(Gtk.Justification.CENTER)
         vbox.pack_start(header, False, False, 0)
 
-        # Notebook for tabs
+        # --- Detect Section ---
+        hbox_detect = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        vbox.pack_start(hbox_detect, False, False, 5)
+        detect_label = Gtk.Label(label="Paste Command:")
+        hbox_detect.pack_start(detect_label, False, False, 0)
+        self.detect_entry = Gtk.Entry()
+        self.detect_entry.set_placeholder_text("Paste existing Steam launch options here (e.g., ENV_VAR=value command -flag --arg value %command%)")
+        self.detect_entry.set_hexpand(True)
+        hbox_detect.pack_start(self.detect_entry, True, True, 0)
+        detect_button = Gtk.Button(label="Parse Command")
+        detect_button.connect("clicked", self.on_detect_clicked)
+        hbox_detect.pack_start(detect_button, False, False, 0)
+
+        # Notebook to manage multiple tabs
         self.notebook = Gtk.Notebook()
         vbox.pack_start(self.notebook, True, True, 0)
 
         # Tab 1: General Steam Options
-        self.toggles = {}
+        self.toggles = {}  # Store toggle switches for General tab
+        self.inputs = {}   # Store input entries for General tab
+        self.general_dropdowns = {}  # Store general dropdowns (like dxlevel)
         self.setup_general_tab(self.notebook)
 
         # Track which tabs have been checked for software
         self.software_checked = {tab: False for tab in TAB_CONFIGS if "software_requirement" in TAB_CONFIGS[tab]}
 
         # Setup tabs for overlay/enhancement tools
-        self.tab_data = {}
+        self.tab_data = defaultdict(lambda: {
+            "toggles": {},
+            "inputs": {},
+            "dropdowns": {},
+            "sliders": {},
+            "slider_values": {},
+            "content_box": None,
+            "enable_toggle": None
+        })
         for tab_name in TAB_CONFIGS:
             self.setup_tab(self.notebook, tab_name)
 
-        # Connect the switch-page signal to check software when a tab is selected
+        # Connect tab switch signal to check software
         self.notebook.connect("switch-page", self.on_tab_switched)
 
-        # Load saved settings
-        self.load_settings()
+        # Create mappings for detection
+        # Defer building mappings and loading settings until UI is fully built
+        GLib.idle_add(self.build_detection_mappings)
+        GLib.idle_add(self.load_settings)
 
         # Buttons at the bottom
         hbox_buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
@@ -418,15 +499,23 @@ class SteamLauncherWindow(Gtk.Window):
         save_button.connect("clicked", self.on_save_clicked)
         hbox_buttons.pack_start(save_button, True, True, 0)
 
-        cancel_button = Gtk.Button(label="Cancel")
-        cancel_button.connect("clicked", self.on_cancel_clicked)
-        hbox_buttons.pack_start(cancel_button, True, True, 0)
-
         launch_button = Gtk.Button(label="Generate Launch Command")
         launch_button.connect("clicked", self.on_launch_clicked)
         hbox_buttons.pack_start(launch_button, True, True, 0)
 
-        # Styling for better readability, including tooltip fix
+        # --- Generated Command Output ---
+        hbox_output = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        vbox.pack_start(hbox_output, False, False, 5)
+        output_label = Gtk.Label(label="Generated Command:")
+        output_label.set_xalign(0)
+        hbox_output.pack_start(output_label, False, False, 0)
+        self.generated_command_entry = Gtk.Entry()
+        self.generated_command_entry.set_placeholder_text("Generated launch command will appear here")
+        self.generated_command_entry.set_editable(False)
+        self.generated_command_entry.set_hexpand(True)
+        hbox_output.pack_start(self.generated_command_entry, True, True, 0)
+
+        # Styling for better readability
         css = """
         window, dialog {
             background-color: #353535;
@@ -460,7 +549,7 @@ class SteamLauncherWindow(Gtk.Window):
         }
         tooltip {
             background-color: #000000;
-            color: #ffffff;  /* Fixed tooltip text color to be visible */
+            color: #ffffff;
             border: 1px solid #a0a0a0;
             border-radius: 5px;
             padding: 4px;
@@ -490,724 +579,905 @@ class SteamLauncherWindow(Gtk.Window):
         # Save settings on window close
         self.connect("destroy", self.on_destroy)
 
+    # SECTION: UI SETUP HELPERS
+    def _create_toggle(self, label, tooltip):
+        """Helper to create a toggle switch (CheckButton)."""
+        hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        toggle = Gtk.CheckButton()
+        lbl = Gtk.Label(label=label)
+        lbl.set_tooltip_text(tooltip)
+        lbl.set_xalign(0.0)
+        hbox.pack_start(toggle, False, False, 0)
+        hbox.pack_start(lbl, True, True, 0)
+        hbox.set_tooltip_text(tooltip)
+        return hbox, toggle
+
+    def _create_input(self, label, tooltip, placeholder):
+        """Helper to create a label and text entry."""
+        hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        lbl = Gtk.Label(label=f"{label}:")
+        lbl.set_tooltip_text(tooltip)
+        lbl.set_xalign(0.0)
+        entry = Gtk.Entry()
+        entry.set_placeholder_text(placeholder)
+        entry.set_tooltip_text(tooltip)
+        entry.set_hexpand(True)
+        hbox.pack_start(lbl, False, False, 0)
+        hbox.pack_start(entry, True, True, 0)
+        hbox.set_tooltip_text(tooltip)
+        return hbox, entry
+
+    def _create_dropdown(self, label, options, default, tooltip):
+        """Helper to create a label and dropdown (ComboBoxText)."""
+        hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        lbl = Gtk.Label(label=f"{label}:")
+        lbl.set_tooltip_text(tooltip)
+        lbl.set_xalign(0.0)
+        combo = Gtk.ComboBoxText()
+        combo.set_tooltip_text(tooltip)
+        for i, option in enumerate(options):
+            combo.append(str(i), option)
+        try:
+            if default is not None and default in options:
+                default_index = options.index(default)
+                combo.set_active(default_index)
+            elif options:
+                combo.set_active(0)
+            else:
+                combo.set_active(-1)
+        except ValueError:
+            if options:
+                combo.set_active(0)
+            else:
+                combo.set_active(-1)
+        hbox.pack_start(lbl, False, False, 0)
+        hbox.pack_start(combo, True, True, 0)
+        hbox.set_tooltip_text(tooltip)
+        return hbox, combo
+
+    def _create_slider(self, label, min_val, max_val, tooltip):
+        """Helper to create a label, slider (Scale), and value label."""
+        hbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
+        lbl = Gtk.Label(label=f"{label}:")
+        lbl.set_tooltip_text(tooltip)
+        lbl.set_xalign(0.0)
+        hbox.pack_start(lbl, False, False, 0)
+
+        hbox_slider = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        adj = Gtk.Adjustment(
+            value=0,
+            lower=min_val,
+            upper=max_val,
+            step_increment=0.01,
+            page_increment=0.1,
+            page_size=0.1
+        )
+        scale = Gtk.Scale(orientation=Gtk.Orientation.HORIZONTAL, adjustment=adj)
+        scale.set_digits(2)
+        scale.set_hexpand(True)
+        scale.set_tooltip_text(tooltip)
+
+        value_label = Gtk.Label(label="0.00")
+        scale.connect("value-changed", lambda slider, lbl=value_label: lbl.set_text(f"{slider.get_value():.2f}"))
+
+        hbox_slider.pack_start(scale, True, True, 0)
+        hbox_slider.pack_start(value_label, False, False, 0)
+
+        hbox.pack_start(hbox_slider, True, True, 0)
+        hbox.set_tooltip_text(tooltip)
+        return hbox, scale
+
+    # SECTION: TAB SETUP
+    # Setup the General tab in the notebook
+    def setup_general_tab(self, notebook):
+        tab_vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        tab_vbox.set_border_width(10)
+        scrolled_window = Gtk.ScrolledWindow()
+        scrolled_window.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scrolled_window.add(tab_vbox)
+
+        # General Toggles
+        toggles_frame = Gtk.Frame(label="Common Launch Flags")
+        tab_vbox.pack_start(toggles_frame, False, False, 0)
+        toggles_grid = Gtk.Grid(column_spacing=20, row_spacing=10)
+        toggles_grid.set_border_width(10)
+        toggles_frame.add(toggles_grid)
+
+        col, row = 0, 0
+        max_cols = 3
+        for flag, tooltip in GENERAL_OPTIONS:
+            label_text = flag.lstrip('-').replace('_', ' ').title()
+            hbox, toggle = self._create_toggle(label_text, f"{tooltip} ({flag})")
+            toggles_grid.attach(hbox, col, row, 1, 1)
+            self.toggles[flag] = toggle
+            col += 1
+            if col >= max_cols:
+                col = 0
+                row += 1
+
+        # General Inputs
+        inputs_frame = Gtk.Frame(label="Common Launch Arguments")
+        tab_vbox.pack_start(inputs_frame, False, False, 10)
+        inputs_grid = Gtk.Grid(column_spacing=10, row_spacing=10)
+        inputs_grid.set_border_width(10)
+        inputs_frame.add(inputs_grid)
+
+        row = 0
+        for flag, label, placeholder in GENERAL_INPUTS:
+            if flag == "-dxlevel":
+                dx_options = DX_LEVEL_PRESETS
+                dx_tooltip = f"{label} ({flag})"
+                hbox_dx, combo_dx = self._create_dropdown("DirectX Level", dx_options, None, dx_tooltip)
+                inputs_grid.attach(hbox_dx, 0, row, 1, 1)
+                self.general_dropdowns[flag] = combo_dx
+            else:
+                label_text = label
+                hbox, entry = self._create_input(label_text, f"{label} ({flag})", placeholder)
+                inputs_grid.attach(hbox, 0, row, 1, 1)
+                self.inputs[flag] = entry
+            row += 1
+
+        notebook.append_page(scrolled_window, Gtk.Label(label="General"))
+
+    # Setup a tab for a specific tool (e.g., Wine, MangoHud)
+    def setup_tab(self, notebook, tab_name):
+        config = TAB_CONFIGS.get(tab_name)
+        if not config:
+            logging.warning(f"No configuration found for tab: {tab_name}")
+            return
+
+        tab_vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        tab_vbox.set_border_width(10)
+        scrolled_window = Gtk.ScrolledWindow()
+        scrolled_window.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scrolled_window.add(tab_vbox)
+
+        # Enable Toggle for the tab
+        enable_toggle = Gtk.CheckButton(label=config.get("enable_label", f"Enable {tab_name}"))
+        enable_toggle.set_tooltip_text(config.get("enable_tooltip", f"Enable {tab_name} options"))
+        tab_vbox.pack_start(enable_toggle, False, False, 0)
+        self.tab_data[tab_name]['enable_toggle'] = enable_toggle
+
+        # Content box to be enabled/disabled
+        content_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        content_box.set_border_width(5)
+        tab_vbox.pack_start(content_box, True, True, 0)
+        self.tab_data[tab_name]['content_box'] = content_box
+        enable_toggle.connect("toggled", self.on_enable_toggle, tab_name)
+
+        # Set initial sensitivity based on toggle state
+        content_box.set_sensitive(enable_toggle.get_active())
+
+        # Toggles for the tab
+        if "toggles" in config:
+            toggles_frame = Gtk.Frame(label="Options / Flags")
+            content_box.pack_start(toggles_frame, False, False, 0)
+            toggles_grid = Gtk.Grid(column_spacing=20, row_spacing=10)
+            toggles_grid.set_border_width(10)
+            toggles_frame.add(toggles_grid)
+
+            col, row = 0, 0
+            max_cols = 2
+            for option, tooltip in config["toggles"]:
+                label_text = option.replace('_', ' ').title()
+                hbox, toggle = self._create_toggle(label_text, tooltip)
+                toggles_grid.attach(hbox, col, row, 1, 1)
+                self.tab_data[tab_name]['toggles'][option] = toggle
+                col += 1
+                if col >= max_cols:
+                    col = 0
+                    row += 1
+
+        # Inputs for the tab
+        if "inputs" in config:
+            inputs_frame = Gtk.Frame(label="Settings / Paths")
+            content_box.pack_start(inputs_frame, False, False, 10)
+            inputs_grid = Gtk.Grid(column_spacing=10, row_spacing=10)
+            inputs_grid.set_border_width(10)
+            inputs_frame.add(inputs_grid)
+            row = 0
+            for option, label, placeholder in config["inputs"]:
+                input_label = label if label else option.replace('_', ' ').title()
+                hbox, entry = self._create_input(input_label, placeholder, placeholder)
+                inputs_grid.attach(hbox, 0, row, 1, 1)
+                self.tab_data[tab_name]['inputs'][option] = entry
+                row += 1
+
+        # Dropdowns for the tab
+        if "dropdowns" in config:
+            dropdowns_frame = Gtk.Frame(label="Choices")
+            content_box.pack_start(dropdowns_frame, False, False, 10)
+            dropdowns_grid = Gtk.Grid(column_spacing=10, row_spacing=10)
+            dropdowns_grid.set_border_width(10)
+            dropdowns_frame.add(dropdowns_grid)
+            row = 0
+            for key, dd_config in config["dropdowns"].items():
+                dropdown_label = dd_config.get("label", key.replace('_', ' ').title())
+                hbox, combo = self._create_dropdown(
+                    dropdown_label,
+                    dd_config.get("options", []),
+                    dd_config.get("default", None),
+                    dd_config.get("tooltip", "")
+                )
+                dropdowns_grid.attach(hbox, 0, row, 1, 1)
+                self.tab_data[tab_name]['dropdowns'][key] = combo
+                row += 1
+
+        # Sliders for the tab
+        if "sliders" in config:
+            sliders_frame = Gtk.Frame(label="Strength / Radius")
+            content_box.pack_start(sliders_frame, False, False, 10)
+            sliders_vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
+            sliders_vbox.set_border_width(10)
+            sliders_frame.add(sliders_vbox)
+            for option, label, min_val, max_val in config["sliders"]:
+                slider_label = label if label else option.replace('_', ' ').title()
+                hbox, slider = self._create_slider(slider_label, min_val, max_val, f"{label} ({option})")
+                sliders_vbox.pack_start(hbox, False, False, 0)
+                self.tab_data[tab_name]['sliders'][option] = slider
+
+        notebook.append_page(scrolled_window, Gtk.Label(label=tab_name))
+
+        # Check software requirement after tab is set up
+        if "software_requirement" in config:
+            GLib.idle_add(self.check_software_and_prompt, tab_name, config["software_requirement"])
+
+    # SECTION: DETECTION MAPPINGS
+    # Create mappings to link command parts/env vars to GUI elements
+    def build_detection_mappings(self):
+        self.flag_to_toggle = {}
+        self.flag_to_input = {}
+        self.env_to_gui = {}
+        self.command_prefixes = {}
+
+        logging.debug("Building detection mappings...")
+
+        # General flags (Toggles)
+        for flag, toggle in self.toggles.items():
+            self.flag_to_toggle[flag] = {"widget": toggle}
+
+        # General inputs (Flags with values)
+        for flag, entry in self.inputs.items():
+            self.flag_to_input[flag] = {"widget": entry}
+
+        # General dropdowns (Flags with values from dropdown)
+        for flag, combo in self.general_dropdowns.items():
+            self.flag_to_input[flag] = {
+                "widget": combo,
+                "type": "combo",
+                "options": [combo.get_model()[i][0] for i in range(len(combo.get_model()))]
+            }
+
+        # Tab-specific mappings
+        for tab_name, config in TAB_CONFIGS.items():
+            tab_widgets = self.tab_data[tab_name]
+
+            # Command Prefixes
+            if "command_prefix" in config:
+                self.command_prefixes[config["command_prefix"]] = tab_name
+
+            # Environment Variables (Toggles)
+            if "toggles" in config:
+                for option, _ in config["toggles"]:
+                    env_var_name = option
+                    self.env_to_gui[env_var_name] = {
+                        "widget": tab_widgets['toggles'][option],
+                        "type": "toggle",
+                        "tab": tab_name,
+                        "option": option
+                    }
+
+            # Environment Variables (Inputs)
+            if "inputs" in config:
+                for option, _, _ in config["inputs"]:
+                    env_var_name = option
+                    self.env_to_gui[env_var_name] = {
+                        "widget": tab_widgets['inputs'][option],
+                        "type": "input",
+                        "tab": tab_name,
+                        "option": option
+                    }
+
+            # Environment Variables (Dropdowns)
+            if "dropdowns" in config:
+                for key, dd_config in config["dropdowns"].items():
+                    env_var_name = key
+                    combo = tab_widgets['dropdowns'][key]
+                    options = [combo.get_model()[i][0] for i in range(len(combo.get_model()))]
+                    self.env_to_gui[env_var_name] = {
+                        "widget": combo,
+                        "type": "dropdown",
+                        "tab": tab_name,
+                        "option": key,
+                        "options": options
+                    }
+
+            # Environment Variables (Sliders)
+            if "sliders" in config:
+                for option, _, _, _ in config["sliders"]:
+                    env_var_name = option
+                    self.env_to_gui[env_var_name] = {
+                        "widget": tab_widgets['sliders'][option],
+                        "type": "slider",
+                        "tab": tab_name,
+                        "option": option
+                    }
+
+            # Gamescope specific flags (handled as command-line flags, not env vars)
+            if tab_name == "Gamescope":
+                if "toggles" in config:
+                    for flag, _ in config["toggles"]:
+                        self.flag_to_toggle[flag] = {"widget": tab_widgets['toggles'][flag], "tab": tab_name}
+                if "inputs" in config:
+                    for flag, _, _ in config["inputs"]:
+                        if flag == "--steam":
+                            self.flag_to_input[flag] = {
+                                "widget": tab_widgets['inputs'][flag],
+                                "tab": tab_name,
+                                "type": "flag_present"
+                            }
+                        else:
+                            self.flag_to_input[flag] = {
+                                "widget": tab_widgets['inputs'][flag],
+                                "tab": tab_name,
+                                "type": "input"
+                            }
+
+        logging.debug(f"Detection mappings built. Env keys: {list(self.env_to_gui.keys())}, "
+                      f"Flag Toggles: {list(self.flag_to_toggle.keys())}, "
+                      f"Flag Inputs: {list(self.flag_to_input.keys())}, "
+                      f"Command Prefixes: {list(self.command_prefixes.keys())}")
+
+    # SECTION: EVENT HANDLERS
+    def on_enable_toggle(self, toggle, tab_name):
+        """Called when an enable toggle for a tab is clicked."""
+        is_active = toggle.get_active()
+        if tab_name in self.tab_data and self.tab_data[tab_name]['content_box']:
+            self.tab_data[tab_name]['content_box'].set_sensitive(is_active)
+            logging.debug(f"Tab '{tab_name}' content sensitivity set to {is_active}")
+            if is_active and "software_requirement" in TAB_CONFIGS[tab_name]:
+                self.check_software_and_prompt(tab_name, TAB_CONFIGS[tab_name]["software_requirement"])
+
+    def on_tab_switched(self, notebook, page, page_num):
+        """Check software requirement when switching to a tab."""
+        tab_widget = notebook.get_nth_page(page_num)
+        tab_label_widget = notebook.get_tab_label(tab_widget)
+        if tab_label_widget:
+            tab_name = tab_label_widget.get_text()
+            if tab_name in TAB_CONFIGS and "software_requirement" in TAB_CONFIGS[tab_name]:
+                if not self.software_checked.get(tab_name, False):
+                    self.check_software_and_prompt(tab_name, TAB_CONFIGS[tab_name]["software_requirement"])
+
+    def on_save_clicked(self, widget):
+        settings = {"general": {}, "tabs": {}}
+
+        # Save General tab settings
+        for flag, toggle in self.toggles.items():
+            settings["general"][flag] = toggle.get_active()
+        for flag, entry in self.inputs.items():
+            settings["general"][flag] = entry.get_text()
+        for flag, combo in self.general_dropdowns.items():
+            settings["general"][flag] = combo.get_active_text()
+
+        # Save Tab settings
+        for tab_name, data in self.tab_data.items():
+            tab_settings = {}
+            if data["enable_toggle"]:
+                tab_settings["enabled"] = data["enable_toggle"].get_active()
+            tab_settings["toggles"] = {key: toggle.get_active() for key, toggle in data["toggles"].items()}
+            tab_settings["inputs"] = {key: entry.get_text() for key, entry in data["inputs"].items()}
+            tab_settings["dropdowns"] = {key: combo.get_active_text() for key, combo in data["dropdowns"].items()}
+            tab_settings["sliders"] = {key: slider.get_value() for key, slider in data["sliders"].items()}
+            settings["tabs"][tab_name] = tab_settings
+
+        try:
+            with open("steam_launcher_settings.json", "w") as f:
+                json.dump(settings, f, indent=4)
+            logging.info("Settings saved successfully.")
+            self.show_info_dialog("Settings Saved", "Configuration saved successfully.")
+        except Exception as e:
+            logging.error(f"Failed to save settings: {e}")
+            self.show_error_dialog("Save Error", f"Could not save settings.\nError: {e}")
+
+    def on_launch_clicked(self, widget):
+        command_parts = []
+        env_vars = {}
+
+        tab_order = TAB_CONFIGS.keys()
+        command_prefixes = []
+        gamescope_flags = []
+        command_suffix = ""
+
+        for tab_name in tab_order:
+            if tab_name in self.tab_data and self.tab_data[tab_name]["enable_toggle"].get_active():
+                config = TAB_CONFIGS[tab_name]
+                data = self.tab_data[tab_name]
+
+                if "command_prefix" in config:
+                    command_prefixes.append(config["command_prefix"])
+                if "command_suffix" in config:
+                    command_suffix = config["command_suffix"]
+
+                if "toggles" in config:
+                    for option, _ in config["toggles"]:
+                        if data["toggles"][option].get_active():
+                            env_vars[option] = "1"
+
+                if "inputs" in config:
+                    for option, _, _ in config["inputs"]:
+                        value = data["inputs"][option].get_text().strip()
+                        if value:
+                            env_vars[option] = value
+
+                if "dropdowns" in config:
+                    for key, dd_config in config["dropdowns"].items():
+                        value = data["dropdowns"][key].get_active_text()
+                        if value is not None:
+                            env_vars[key] = value
+
+                if "sliders" in config:
+                    for option, _, _, _ in config["sliders"]:
+                        value = data["sliders"][option].get_value()
+                        # Skip vkBasalt sliders with value 0
+                        if tab_name == "vkBasalt" and value == 0:
+                            continue
+                        env_vars[option] = str(value)
+
+                if tab_name == "Gamescope":
+                    if "toggles" in config:
+                        for flag, _ in config["toggles"]:
+                            if data["toggles"][flag].get_active():
+                                gamescope_flags.append(flag)
+                    if "inputs" in config:
+                        for flag, _, _ in config["inputs"]:
+                            value = data["inputs"][flag].get_text().strip()
+                            if value or flag == "--steam":
+                                if flag == "--steam" and not value:
+                                    gamescope_flags.append(flag)
+                                elif value:
+                                    gamescope_flags.extend([flag, shlex.quote(value)])
+
+        env_string_parts = []
+        for key, value in env_vars.items():
+            env_string_parts.append(f"{key}={shlex.quote(value)}")
+        env_string = " ".join(env_string_parts)
+
+        if env_string:
+            command_parts.append(env_string)
+
+        command_parts.extend(command_prefixes)
+
+        if "gamescope" in command_prefixes:
+            command_parts.extend(gamescope_flags)
+            if command_suffix:
+                command_parts.append(command_suffix)
+
+        for flag, toggle in self.toggles.items():
+            if toggle.get_active():
+                command_parts.append(flag)
+
+        for flag, entry in self.inputs.items():
+            value = entry.get_text().strip()
+            if value:
+                command_parts.extend([flag, shlex.quote(value)])
+
+        for flag, combo in self.general_dropdowns.items():
+            value = combo.get_active_text()
+            if value is not None:
+                command_parts.extend([flag, shlex.quote(value)])
+
+        command_parts.append("%command%")
+
+        final_command = " ".join(command_parts)
+        logging.info(f"Generated command: {final_command}")
+        self.generated_command_entry.set_text(final_command)
+        self.show_info_dialog("Command Generated", "The launch command has been generated and appears below.\n\n" + final_command)
+
+    def on_detect_clicked(self, widget):
+        """Parses the command string and updates the UI."""
+        command_string = self.detect_entry.get_text().strip()
+        if not command_string or "%command%" not in command_string:
+            self.show_error_dialog("Invalid Command", "Please paste a valid Steam launch command string containing '%command%'.")
+            return
+
+        logging.info(f"Parsing command: {command_string}")
+
+        self.reset_uiarea()
+
+        try:
+            parts = shlex.split(command_string, posix=True)
+        except ValueError as e:
+            logging.error(f"Failed to parse command string with shlex: {e}")
+            self.show_error_dialog("Parsing Error", f"Could not parse the command string.\nError: {e}")
+            return
+
+        env_vars = {}
+        command_and_args = []
+        is_env_section = True
+
+        for part in parts:
+            if is_env_section and '=' in part and not part.startswith('-') and part.split('=')[0].replace('_', '').isalnum():
+                try:
+                    key, value = part.split('=', 1)
+                    env_vars[key] = value
+                    logging.debug(f"Parsed env var: {key}={value}")
+                except ValueError:
+                    logging.warning(f"Skipping invalid env var part: {part}")
+                    command_and_args.append(part)
+                    is_env_section = False
+            else:
+                command_and_args.append(part)
+                is_env_section = False
+
+        logging.debug(f"Parsed command and args: {command_and_args}")
+        logging.debug(f"Parsed env vars: {env_vars}")
+
+        active_tabs_from_env = set()
+        for env_key, env_value in env_vars.items():
+            if env_key in self.env_to_gui:
+                mapping = self.env_to_gui[env_key]
+                widget = mapping["widget"]
+                widget_type = mapping["type"]
+                tab_name = mapping.get("tab")
+
+                logging.debug(f"Matching env var '{env_key}' to widget type '{widget_type}' in tab '{tab_name}'")
+
+                if tab_name and tab_name in self.tab_data and self.tab_data[tab_name]["enable_toggle"]:
+                    self.tab_data[tab_name]["enable_toggle"].set_active(True)
+                    active_tabs_from_env.add(tab_name)
+
+                if widget_type == "toggle":
+                    if env_key in env_vars:
+                        widget.set_active(True)
+                elif widget_type == "input":
+                    widget.set_text(env_value)
+                elif widget_type == "dropdown":
+                    options = mapping.get("options", [])
+                    try:
+                        index = options.index(env_value)
+                        widget.set_active(index)
+                    except ValueError:
+                        logging.warning(f"Value '{env_value}' not found in options for env var '{env_key}'")
+                elif widget_type == "slider":
+                    try:
+                        slider_value = float(env_value)
+                        widget.set_value(slider_value)
+                        if isinstance(widget.get_parent(), Gtk.Box) and len(widget.get_parent().get_children()) > 1:
+                            value_label = widget.get_parent().get_children()[1]
+                            if isinstance(value_label, Gtk.Label):
+                                value_label.set_text(f"{slider_value:.2f}")
+                    except (ValueError, TypeError):
+                        logging.warning(f"Could not convert env var value '{env_value}' to float for slider '{env_key}'")
+
+        active_tabs_from_command = set()
+        processed_gamescope_flags = False
+
+        i = 0
+        while i < len(command_and_args):
+            part = command_and_args[i]
+
+            if part in self.command_prefixes:
+                tab_name = self.command_prefixes[part]
+                if tab_name in self.tab_data and self.tab_data[tab_name]["enable_toggle"]:
+                    self.tab_data[tab_name]["enable_toggle"].set_active(True)
+                    active_tabs_from_command.add(tab_name)
+                    logging.debug(f"Detected command prefix '{part}', enabling tab '{tab_name}'")
+
+                if tab_name == "Gamescope" and not processed_gamescope_flags:
+                    gamescope_config = TAB_CONFIGS.get("Gamescope", {})
+                    gamescope_suffix = gamescope_config.get("command_suffix", "--")
+                    j = i + 1
+                    while j < len(command_and_args) and command_and_args[j] != gamescope_suffix and command_and_args[j] != "%command%":
+                        gamescope_part = command_and_args[j]
+                        if gamescope_part in self.flag_to_toggle:
+                            mapping = self.flag_to_toggle[gamescope_part]
+                            widget = mapping["widget"]
+                            widget.set_active(True)
+                            logging.debug(f"Matching Gamescope toggle flag '{gamescope_part}'")
+                        elif gamescope_part in self.flag_to_input:
+                            mapping = self.flag_to_input[gamescope_part]
+                            widget = mapping["widget"]
+                            widget_type = mapping.get("type", "input")
+                            if widget_type == "input" and j + 1 < len(command_and_args):
+                                value = command_and_args[j + 1]
+                                widget.set_text(value)
+                                logging.debug(f"Matching Gamescope input flag '{gamescope_part}' with value '{value}'")
+                                j += 1
+                            elif widget_type == "flag_present":
+                                widget.set_text(gamescope_part)
+                                logging.debug(f"Matching Gamescope presence flag '{gamescope_part}'")
+                            else:
+                                logging.warning(f"Gamescope input flag '{gamescope_part}' found but no value provided.")
+                        j += 1
+                    i = j - 1
+                    processed_gamescope_flags = True
+
+            elif part in self.flag_to_toggle:
+                mapping = self.flag_to_toggle[part]
+                widget = mapping["widget"]
+                widget.set_active(True)
+                logging.debug(f"Matching general toggle flag '{part}'")
+
+            elif part in self.flag_to_input:
+                mapping = self.flag_to_input[part]
+                widget = mapping["widget"]
+                widget_type = mapping.get("type", "input")
+                if widget_type == "input" and i + 1 < len(command_and_args):
+                    value = command_and_args[i + 1]
+                    widget.set_text(value)
+                    logging.debug(f"Matching general input flag '{part}' with value '{value}'")
+                    i += 1
+                elif widget_type == "combo" and i + 1 < len(command_and_args):
+                    value = command_and_args[i + 1]
+                    options = mapping.get("options", [])
+                    try:
+                        index = options.index(value)
+                        widget.set_active(index)
+                        logging.debug(f"Matching general dropdown flag '{part}' with value '{value}'")
+                    except ValueError:
+                        logging.warning(f"Value '{value}' not found in options for flag '{part}'")
+                    i += 1
+                elif widget_type == "flag_present":
+                    widget.set_text(part)
+                    logging.debug(f"Matching general presence flag '{part}'")
+                else:
+                    logging.warning(f"General input flag '{part}' found but no value provided.")
+
+            elif part == "%command%":
+                logging.debug("Found %command% placeholder. Stopping command parsing.")
+                break
+
+            else:
+                logging.debug(f"Unrecognized command part: '{part}'")
+
+            i += 1
+
+        for tab_name in active_tabs_from_env.union(active_tabs_from_command):
+            if tab_name in self.tab_data and self.tab_data[tab_name]['content_box']:
+                self.tab_data[tab_name]['content_box'].set_sensitive(True)
+
+        self.show_info_dialog("Parsing Complete", "Attempted to parse the command and update settings.")
+
+    def reset_uiarea(self):
+        """Resets all UI elements to their default/inactive state."""
+        logging.debug("Resetting UI...")
+
+        for toggle in self.toggles.values():
+            toggle.set_active(False)
+        for entry in self.inputs.values():
+            entry.set_text("")
+        for combo in self.general_dropdowns.values():
+            if combo.get_model() and combo.get_model().get_iter_first():
+                combo.set_active(0)
+            else:
+                combo.set_active(-1)
+
+        for tab_name, data in self.tab_data.items():
+            if data["enable_toggle"]:
+                data["enable_toggle"].set_active(False)
+            if data['content_box']:
+                data['content_box'].set_sensitive(False)
+
+            for toggle in data["toggles"].values():
+                toggle.set_active(False)
+            for entry in data["inputs"].values():
+                entry.set_text("")
+            for combo in data["dropdowns"].values():
+                if combo.get_model() and combo.get_model().get_iter_first():
+                    combo.set_active(0)
+                else:
+                    combo.set_active(-1)
+            for slider in data["sliders"].values():
+                adjustment = slider.get_adjustment()
+                adjustment.set_value(adjustment.get_lower())
+                if isinstance(slider.get_parent(), Gtk.Box) and len(slider.get_parent().get_children()) > 1:
+                    value_label = slider.get_parent().get_children()[1]
+                    if isinstance(value_label, Gtk.Label):
+                        value_label.set_text(f"{adjustment.get_lower():.2f}")
+
+        self.generated_command_entry.set_text("")
+        self.detect_entry.set_text("")
+        logging.debug("UI reset complete.")
+
+    # SECTION: SOFTWARE CHECKING
+    def check_software_and_prompt(self, tab_name, requirement):
+        """Checks if required software exists and prompts the user if not, except for vkBasalt."""
+        if self.software_checked.get(tab_name, False):
+            logging.debug(f"Software '{requirement}' for tab '{tab_name}' already checked.")
+            return
+
+        logging.debug(f"Checking software requirement for '{tab_name}': {requirement}")
+        if self.check_software(requirement):
+            logging.info(f"Software '{requirement}' found.")
+            self.software_checked[tab_name] = True
+        else:
+            logging.warning(f"Software '{requirement}' not found in PATH.")
+            # Skip prompting for vkBasalt
+            if requirement == "vkbasalt":
+                logging.info("Skipping installation prompt for vkBasalt as per user request.")
+                self.software_checked[tab_name] = True
+                return
+            self.prompt_install(requirement)
+
     def check_software(self, software):
         try:
-            subprocess.run(["which", software.lower()], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            subprocess.run(["which", software], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             return True
         except subprocess.CalledProcessError:
             return False
 
+    # SECTION: SOFTWARE INSTALLATION PROMPT
     def prompt_install(self, software):
         dialog = Gtk.MessageDialog(
             transient_for=self,
             flags=0,
             message_type=Gtk.MessageType.QUESTION,
-            text=f"{software} is required but not found. Would you like to install it?"
+            text=f"{software} is required but not found. Would you like to attempt to install it using apt?",
+            buttons=Gtk.ButtonsType.YES_NO
         )
-        dialog.add_buttons("Yes", Gtk.ResponseType.YES, "No", Gtk.ResponseType.NO)
         response = dialog.run()
         dialog.destroy()
+
         if response == Gtk.ResponseType.YES:
             password_dialog = Gtk.Dialog(
                 title="Enter Password",
                 transient_for=self,
-                flags=0
+                flags=Gtk.DialogFlags.MODAL | Gtk.DialogFlags.DESTROY_WITH_PARENT
             )
-            password_dialog.add_buttons("OK", Gtk.ResponseType.OK, "Cancel", Gtk.ResponseType.CANCEL)
-            password_dialog.set_default_size(300, 100)
+            password_dialog.add_buttons(
+                "_OK", Gtk.ResponseType.OK,
+                "_Cancel", Gtk.ResponseType.CANCEL
+            )
+
             vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
-            password_dialog.get_content_area().add(vbox)
-            label = Gtk.Label(label="Enter your password to install:")
+            vbox.set_border_width(10)
+            password_dialog.get_content_area().pack_start(vbox, True, True, 0)
+
+            label = Gtk.Label(label="Enter your password for sudo:")
             vbox.pack_start(label, False, False, 0)
             password_entry = Gtk.Entry()
             password_entry.set_visibility(False)
+            password_entry.set_invisible_char("*")
             vbox.pack_start(password_entry, False, False, 0)
+
             password_dialog.show_all()
+            password_entry.grab_focus()
+
             response = password_dialog.run()
             password = password_entry.get_text() if response == Gtk.ResponseType.OK else ""
             password_dialog.destroy()
+
             if password:
                 try:
-                    cmd = ["sudo", "apt", "install", "-y", software.lower()]
-                    child = pexpect.spawn(" ".join(cmd))
-                    i = child.expect(["[sudo] password for " + os.getlogin() + ":", pexpect.EOF, pexpect.TIMEOUT], timeout=5)
+                    cmd = f"sudo apt install -y {shlex.quote(software)}"
+                    logging.info(f"Attempting to install {software} with command: {cmd}")
+                    child = pexpect.spawn(cmd)
+                    i = child.expect(["[sudo] password for .*: ", pexpect.EOF, pexpect.TIMEOUT], timeout=60)
                     if i == 0:
                         child.sendline(password)
-                        child.expect(pexpect.EOF)
-                        output = child.before.decode()
+                        child.expect(pexpect.EOF, timeout=300)
+                        output = child.before.decode('utf-8', errors='ignore')
+                        logging.debug(f"Installation output:\n{output}")
+
                         if child.exitstatus == 0:
-                            dialog = Gtk.MessageDialog(
-                                transient_for=self,
-                                flags=0,
-                                message_type=Gtk.MessageType.INFO,
-                                buttons=Gtk.ButtonsType.OK,
-                                text=f"{software} installed successfully!"
-                            )
-                            dialog.run()
-                            dialog.destroy()
+                            self.show_info_dialog(f"{software} installed successfully!", output)
                         else:
-                            dialog = Gtk.MessageDialog(
-                                transient_for=self,
-                                flags=0,
-                                message_type=Gtk.MessageType.ERROR,
-                                buttons=Gtk.ButtonsType.OK,
-                                text=f"Failed to install {software}: {output}"
-                            )
-                            dialog.run()
-                            dialog.destroy()
+                            error_message = f"Failed to install {software}.\nExit status: {child.exitstatus}\nOutput:\n{output}"
+                            logging.error(error_message)
+                            self.show_error_dialog(f"Installation Failed", error_message)
                     else:
-                        dialog = Gtk.MessageDialog(
-                            transient_for=self,
-                            flags=0,
-                            message_type=Gtk.MessageType.ERROR,
-                            buttons=Gtk.ButtonsType.OK,
-                            text=f"Could not prompt for password or installation timed out."
-                        )
-                        dialog.run()
-                        dialog.destroy()
+                        error_message = f"Installation attempt failed or timed out. Is apt available and sudo configured correctly?\nOutput:\n{child.before.decode('utf-8', errors='ignore')}"
+                        logging.error(error_message)
+                        self.show_error_dialog("Installation Error", error_message)
+
+                except pexpect.exceptions.Exception as e:
+                    logging.error(f"pexpect error during installation: {e}")
+                    self.show_error_dialog("Installation Error", f"An error occurred during installation.\nError: {e}")
                 except Exception as e:
-                    dialog = Gtk.MessageDialog(
-                        transient_for=self,
-                        flags=0,
-                        message_type=Gtk.MessageType.ERROR,
-                        buttons=Gtk.ButtonsType.OK,
-                        text=f"Error during installation: {str(e)}"
-                    )
-                    dialog.run()
-                    dialog.destroy()
-            return response == Gtk.ResponseType.OK
-        return False
+                    logging.error(f"Unexpected error during installation: {e}")
+                    self.show_error_dialog("Installation Error", f"An unexpected error occurred during installation.\nError: {e}")
 
-    def on_tab_switched(self, notebook, page, page_num):
-        # Adjust for General tab at index 0
-        tab_index = page_num - 1
-        tab_names = list(TAB_CONFIGS.keys())
-        if tab_index >= 0 and tab_index < len(tab_names):
-            tab_name = tab_names[tab_index]
-            if tab_name in self.software_checked and not self.software_checked[tab_name]:
-                self.software_checked[tab_name] = True
-                config = TAB_CONFIGS[tab_name]
-                if "software_requirement" in config and not self.check_software(config["software_requirement"]):
-                    if self.prompt_install(tab_name):
-                        pass
-                    else:
-                        label = Gtk.Label(label=f"{tab_name} is not installed. Please install it to use this tab.")
-                        page.get_children()[0].pack_start(label, True, True, 0)
-                        page.show_all()
+                self.software_checked[software] = True
 
-    def setup_general_tab(self, notebook):
-        scrolled_window = Gtk.ScrolledWindow()
-        scrolled_window.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
-
-        grid = Gtk.Grid()
-        grid.set_column_spacing(20)
-        grid.set_row_spacing(10)
-        scrolled_window.add(grid)
-
-        for i, (option, tooltip) in enumerate(GENERAL_OPTIONS):
-            hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
-            label = Gtk.Label(label=option)
-            label.set_halign(Gtk.Align.START)
-            toggle = Gtk.Switch()
-            toggle.set_halign(Gtk.Align.END)
-            toggle.set_tooltip_text(tooltip)
-            hbox.pack_start(label, True, True, 0)
-            hbox.pack_end(toggle, False, False, 0)
-            self.toggles[option] = toggle
-            col = i % 4
-            row = i // 4
-            grid.attach(hbox, col, row, 1, 1)
-
-        self.inputs = {}
-        input_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
-        for option, tooltip, placeholder in GENERAL_INPUTS:
-            hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=5)
-            label = Gtk.Label(label=f"{option}:")
-            entry = Gtk.Entry()
-            entry.set_placeholder_text(placeholder)
-            entry.set_tooltip_text(tooltip)
-            if option == "DXLevel":
-                button = Gtk.Button(label="Presets")
-                button.connect("clicked", self.on_dxlevel_preset_clicked, entry)
-                hbox.pack_start(label, False, False, 0)
-                hbox.pack_start(entry, True, True, 0)
-                hbox.pack_start(button, False, False, 0)
-            else:
-                if "path" in tooltip.lower():
-                    button = Gtk.Button(label="Browse")
-                    button.connect("clicked", self.on_path_browse_clicked, entry)
-                    hbox.pack_start(label, False, False, 0)
-                    hbox.pack_start(entry, True, True, 0)
-                    hbox.pack_start(button, False, False, 0)
-                else:
-                    hbox.pack_start(label, False, False, 0)
-                    hbox.pack_start(entry, True, True, 0)
-            input_box.pack_start(hbox, False, False, 0)
-            self.inputs[option] = entry
-
-        hbox_args = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=5)
-        args_label = Gtk.Label(label="Custom Arguments:")
-        self.args_entry = Gtk.Entry()
-        self.args_entry.set_placeholder_text("e.g., -customoption value")
-        hbox_args.pack_start(args_label, False, False, 0)
-        hbox_args.pack_start(self.args_entry, True, True, 0)
-
-        general_vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
-        general_vbox.pack_start(scrolled_window, True, True, 0)
-        general_vbox.pack_start(input_box, False, False, 0)
-        general_vbox.pack_start(hbox_args, False, False, 0)
-
-        notebook.append_page(general_vbox, Gtk.Label(label="General"))
-
-    def setup_tab(self, notebook, tab_name):
-        config = TAB_CONFIGS[tab_name]
-        self.tab_data[tab_name] = {
-            "toggles": {},
-            "inputs": {},
-            "dropdowns": {},
-            "sliders": {},
-            "slider_toggles": {},
-        }
-
-        vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
-
-        # Master toggle with prominent styling
-        hbox_enable = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
-        hbox_enable.set_margin_top(10)
-        hbox_enable.set_margin_bottom(10)
-        label = Gtk.Label(label=config["enable_label"])
-        label.get_style_context().add_class("enable-label")
-        enable_toggle = Gtk.Switch()
-        enable_toggle.set_halign(Gtk.Align.END)
-        enable_toggle.set_tooltip_text(config["enable_tooltip"])
-        hbox_enable.pack_start(label, True, True, 0)
-        hbox_enable.pack_end(enable_toggle, False, False, 0)
-        vbox.pack_start(hbox_enable, False, False, 0)
-        self.tab_data[tab_name]["enable_toggle"] = enable_toggle
-
-        # Separator to make the enable toggle more distinct
-        separator = Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL)
-        vbox.pack_start(separator, False, False, 0)
-
-        # Toggles
-        if "toggles" in config:
-            grid = Gtk.Grid()
-            grid.set_column_spacing(20)
-            grid.set_row_spacing(10)
-            if tab_name == "vkBasalt":
-                grid.get_style_context().add_class("vkbasalt-grid")
-            scrolled_window = Gtk.ScrolledWindow()
-            scrolled_window.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
-            scrolled_window.add(grid)
-
-            for i, (option, tooltip) in enumerate(config["toggles"]):
-                hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
-                label_text = option.replace(f"{tab_name.upper()}_", "") if tab_name != "Gamescope" else tooltip
-                label = Gtk.Label(label=label_text)
-                label.set_halign(Gtk.Align.START)
-                toggle = Gtk.Switch()
-                toggle.set_halign(Gtk.Align.END)
-                toggle.set_tooltip_text(tooltip)
-                hbox.pack_start(label, True, True, 0)
-                hbox.pack_end(toggle, False, False, 0)
-                self.tab_data[tab_name]["toggles"][option] = toggle
-                col = i % 4
-                row = i // 4
-                grid.attach(hbox, col, row, 1, 1)
-
-            vbox.pack_start(scrolled_window, True, True, 0)
-
-        # Inputs
-        if "inputs" in config:
-            input_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
-            for option, tooltip, placeholder in config["inputs"]:
-                hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=5)
-                label = Gtk.Label(label=f"{option}:")
-                entry = Gtk.Entry()
-                entry.set_placeholder_text(placeholder)
-                entry.set_tooltip_text(tooltip)
-                if "path" in tooltip.lower():
-                    button = Gtk.Button(label="Browse")
-                    button.connect("clicked", self.on_path_browse_clicked, entry)
-                    hbox.pack_start(label, False, False, 0)
-                    hbox.pack_start(entry, True, True, 0)
-                    hbox.pack_start(button, False, False, 0)
-                else:
-                    hbox.pack_start(label, False, False, 0)
-                    hbox.pack_start(entry, True, True, 0)
-                input_box.pack_start(hbox, False, False, 0)
-                self.tab_data[tab_name]["inputs"][option] = entry
-            vbox.pack_start(input_box, False, False, 0)
-
-        # Dropdowns
-        if "dropdowns" in config:
-            for key, dropdown_config in config["dropdowns"].items():
-                hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=5)
-                label = Gtk.Label(label=dropdown_config["label"])
-                combo = Gtk.ComboBoxText()
-                for option in dropdown_config["options"]:
-                    combo.append_text(option)
-                default_index = dropdown_config["options"].index(dropdown_config["default"]) if "default" in dropdown_config else 0
-                combo.set_active(default_index)
-                combo.set_tooltip_text(dropdown_config["tooltip"])
-                hbox.pack_start(label, False, False, 0)
-                hbox.pack_start(combo, True, True, 0)
-                self.tab_data[tab_name]["dropdowns"][key] = combo
-                vbox.pack_start(hbox, False, False, 0)
-
-        # Sliders (for vkBasalt)
-        if "sliders" in config and tab_name == "vkBasalt":
-            # Create a grid for sliders
-            slider_grid = Gtk.Grid()
-            slider_grid.set_column_spacing(20)
-            slider_grid.set_row_spacing(10)
-            scrolled_window = Gtk.ScrolledWindow()
-            scrolled_window.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
-            scrolled_window.add(slider_grid)
-
-            for i, (option, tooltip, min_val, max_val) in enumerate(config["sliders"]):
-                hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=5)
-                toggle = Gtk.Switch()
-                toggle.set_tooltip_text(f"Enable {tooltip.lower()}")
-                toggle.connect("state-set", self.on_slider_toggle_changed, tab_name, option)
-                label = Gtk.Label(label=f"{option}:")
-                revealer = Gtk.Revealer()
-                adjustment = Gtk.Adjustment(value=0.5 if max_val <= 1.0 else 5.0, lower=min_val, upper=max_val, step_increment=0.1)
-                slider = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, min_val, max_val, 0.1)
-                slider.set_adjustment(adjustment)
-                slider.set_digits(1)
-                slider.set_size_request(200, -1)  # Set a reasonable width for sliders
-                slider.set_tooltip_text(tooltip)
-                revealer.add(slider)
-                hbox.pack_start(label, False, False, 0)
-                hbox.pack_start(toggle, False, False, 0)
-                hbox.pack_start(revealer, True, True, 0)
-                col = i % 2  # Arrange in 2 columns
-                row = i // 2
-                slider_grid.attach(hbox, col, row, 1, 1)
-                self.tab_data[tab_name]["slider_toggles"][option] = toggle
-                self.tab_data[tab_name]["sliders"][option] = (revealer, slider)
-
-            vbox.pack_start(scrolled_window, True, True, 0)
-
-        notebook.append_page(vbox, Gtk.Label(label=tab_name))
-
-    def on_slider_toggle_changed(self, switch, state, tab_name, option):
-        revealer, _ = self.tab_data[tab_name]["sliders"][option]
-        revealer.set_reveal_child(state)
-
-    def save_settings(self):
-        settings = {
-            "general": {
-                "toggles": {key: toggle.get_active() for key, toggle in self.toggles.items()},
-                "inputs": {key: entry.get_text() for key, entry in self.inputs.items()},
-                "args_entry": self.args_entry.get_text(),
-            },
-            "tabs": {}
-        }
-
-        for tab_name, data in self.tab_data.items():
-            tab_settings = {
-                "enable_toggle": data["enable_toggle"].get_active(),
-                "toggles": {key: toggle.get_active() for key, toggle in data["toggles"].items()},
-                "inputs": {key: entry.get_text() for key, entry in data["inputs"].items()},
-                "dropdowns": {key: combo.get_active_text() for key, combo in data["dropdowns"].items()},
-                "sliders": {},
-                "slider_toggles": {key: toggle.get_active() for key, toggle in data["slider_toggles"].items()},
-            }
-            for key, (revealer, slider) in data["sliders"].items():
-                tab_settings["sliders"][key] = slider.get_value()
-            settings["tabs"][tab_name] = tab_settings
-
-        with open("settings.json", "w") as f:
-            json.dump(settings, f, indent=4)
-
-    def load_settings(self):
-        if not os.path.exists("settings.json"):
-            return
-
-        with open("settings.json", "r") as f:
-            settings = json.load(f)
-
-        # Load General tab settings
-        general_settings = settings.get("general", {})
-        for key, active in general_settings.get("toggles", {}).items():
-            if key in self.toggles:
-                self.toggles[key].set_active(active)
-        for key, value in general_settings.get("inputs", {}).items():
-            if key in self.inputs:
-                self.inputs[key].set_text(value)
-        self.args_entry.set_text(general_settings.get("args_entry", ""))
-
-        # Load tab settings
-        for tab_name, tab_settings in settings.get("tabs", {}).items():
-            if tab_name not in self.tab_data:
-                continue
-            data = self.tab_data[tab_name]
-            data["enable_toggle"].set_active(tab_settings.get("enable_toggle", False))
-            for key, active in tab_settings.get("toggles", {}).items():
-                if key in data["toggles"]:
-                    data["toggles"][key].set_active(active)
-            for key, value in tab_settings.get("inputs", {}).items():
-                if key in data["inputs"]:
-                    data["inputs"][key].set_text(value)
-            for key, value in tab_settings.get("dropdowns", {}).items():
-                if key in data["dropdowns"]:
-                    combo = data["dropdowns"][key]
-                    for i, option in enumerate(combo.get_model()):
-                        if option[0] == value:
-                            combo.set_active(i)
-                            break
-            for key, value in tab_settings.get("sliders", {}).items():
-                if key in data["sliders"]:
-                    _, slider = data["sliders"][key]
-                    slider.set_value(value)
-            for key, active in tab_settings.get("slider_toggles", {}).items():
-                if key in data["slider_toggles"]:
-                    toggle = data["slider_toggles"][key]
-                    toggle.set_active(active)
-                    revealer, _ = data["sliders"][key]
-                    revealer.set_reveal_child(active)
-
-    def on_save_clicked(self, button):
-        self.save_settings()
+    # SECTION: DIALOG HELPERS
+    def show_info_dialog(self, title, message):
+        """Shows an info dialog."""
         dialog = Gtk.MessageDialog(
-            transient_for=self,
-            flags=0,
-            message_type=Gtk.MessageType.INFO,
+            parent=self,
+            flags=Gtk.DialogFlags.MODAL | Gtk.DialogFlags.DESTROY_WITH_PARENT,
+            type=Gtk.MessageType.INFO,
             buttons=Gtk.ButtonsType.OK,
-            text="Settings saved successfully!"
+            message_format=title,
         )
+        dialog.format_secondary_text(message)
         dialog.run()
         dialog.destroy()
 
-    def on_destroy(self, widget):
-        self.save_settings()
-        Gtk.main_quit()
-
-    def on_dxlevel_preset_clicked(self, button, entry):
-        menu = Gtk.Menu()
-        for preset in DX_LEVEL_PRESETS:
-            item = Gtk.MenuItem(label=preset)
-            item.connect("activate", self.on_dxlevel_preset_selected, entry, preset)
-            menu.append(item)
-        menu.show_all()
-        menu.popup(None, None, None, None, button.get_pointer()[1], Gtk.get_current_event_time())
-
-    def on_dxlevel_preset_selected(self, menuitem, entry, preset):
-        entry.set_text(preset)
-
-    def on_path_browse_clicked(self, button, entry):
-        dialog = Gtk.FileChooserDialog(
-            title="Select a File or Directory",
-            transient_for=self,
-            action=Gtk.FileChooserAction.SELECT_FOLDER if entry.get_placeholder_text().startswith("e.g., /path") else Gtk.FileChooserAction.OPEN,
-            buttons=(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL, Gtk.STOCK_OPEN, Gtk.ResponseType.OK)
+    def show_error_dialog(self, title, message):
+        """Shows an error dialog."""
+        dialog = Gtk.MessageDialog(
+            parent=self,
+            flags=Gtk.DialogFlags.MODAL | Gtk.DialogFlags.DESTROY_WITH_PARENT,
+            type=Gtk.MessageType.ERROR,
+            buttons=Gtk.ButtonsType.CANCEL,
+            message_format=title,
         )
-        response = dialog.run()
-        if response == Gtk.ResponseType.OK:
-            entry.set_text(dialog.get_filename())
+        dialog.format_secondary_text(message)
+        dialog.run()
         dialog.destroy()
 
-    def on_launch_clicked(self, button):
-        command = []
-
-        # General Steam options
-        toggle_mapping = {
-            "NoHLTV": "-nohltv",
-            "NoVid": "-novid",
-            "Console": "-console",
-            "Steam": "-steam",
-            "NoSteamController": "-nosteamcontroller",
-            "NoJoy": "-nojoy",
-            "NoSound": "-nosound",
-            "NoVSync": "-novsync",
-            "Fullscreen": "-fullscreen",
-            "Window": "-window",
-            "NoBorder": "-noborder",
-            "SafeMode": "-safe_mode",
-            "High": "-high",
-            "Low": "-low",
-            "Mid": "-mid",
-            "NoBenchmark": "-nobenchmark",
-            "NoSplash": "-nosplash",
-            "NoLogo": "-nologo",
-            "NoIPX": "-noipx",
-            "NoIP": "-noip",
-            "NoVoice": "-novoice",
-            "NoCloud": "-nocloud",
-            "NoHTTP": "-nohttp",
-            "NoSteamUpdate": "-nosteamupdate",
-            "NoSoundInit": "-nosoundinit",
-            "NoCrashDialog": "-nocrashdialog",
-            "NoCrashDump": "-nocrashdump",
-            "NoAsserts": "-noasserts",
-            "NoHomeDirFixup": "-nohomedirfixup",
-            "NoAutoCloud": "-noautocloud",
-            "NoAutoJoystick": "-noautojoystick",
-            "NoMiniDumps": "-nominidumps",
-            "NoCache": "-nocache",
-            "NoAsync": "-noasync",
-            "NoHW": "-nohw",
-            "Soft": "-soft",
-            "NoGrab": "-nograb",
-            "NoGamepad": "-nogamepad",
-            "NoXInput": "-noxinput",
-            "NoGPUWatch": "-nogpuwatch",
-            "NoCursor": "-nocursor",
-            "NoHWCursor": "-nohwcursor",
-            "NoGL": "-nogl",
-            "NoD3D9": "-nod3d9",
-            "NoD3D11": "-nod3d11",
-            "NoMouse": "-nomouse",
-            "NoKB": "-nokb",
-            "NoLock": "-nolock",
-            "NoCommand": "-nocommand",
-            "NoLog": "-nolog",
-            "NoProfile": "-noprofile",
-            "NoRestart": "-norestart",
-            "NoUpdate": "-noupdate",
-            "NoShip": "-noship",
-            "NoShaderCache": "-noshadercache",
-            "NoShaderCompile": "-noshadercompile",
-            "NoShaderLoad": "-noshaderload",
-            "NoShaderPrecompile": "-noshaderprecompile",
-            "NoShaderPrecache": "-noshaderprecache",
-            "NoShaderPreload": "-noshaderpreload",
-            "NoShaderPrewarm": "-noshaderprewarm",
-            "NoShaderPreoptimize": "-noshaderpreoptimize",
-            "NoShaderPrecompileAll": "-noshaderprecompileall",
-            "NoShaderPrecacheAll": "-noshaderprecacheall",
-            "NoShaderPreloadAll": "-noshaderpreloadall",
-            "NoShaderPrewarmAll": "-noshaderprewarmall",
-            "NoShaderPreoptimizeAll": "-noshaderpreoptimizeall",
-        }
-
-        for option, toggle in self.toggles.items():
-            if toggle.get_active():
-                if option in toggle_mapping:
-                    command.append(toggle_mapping[option])
-
-        input_mapping = {
-            "Width": "-width",
-            "Height": "-height",
-            "DXLevel": "-dxlevel",
-            "Particles": "-particles",
-            "Refresh": "-refresh",
-        }
-
-        for option, entry in self.inputs.items():
-            value = entry.get_text().strip()
-            if value:
-                command.append(input_mapping[option])
-                command.append(value)
-
-        # Process each tab
-        for tab_name, data in self.tab_data.items():
-            if not data["enable_toggle"].get_active():
-                continue
-
-            # Wine
-            if tab_name == "Wine":
-                active_toggles = any(toggle.get_active() for toggle in data["toggles"].values())
-                active_inputs = any(entry.get_text().strip() for entry in data["inputs"].values())
-                if active_toggles or active_inputs:
-                    options = []
-                    for option, toggle in data["toggles"].items():
-                        if toggle.get_active():
-                            options.append(f"{option}=1")
-                    for option in ["WINEPREFIX", "WINEARCH", "WINEDLLOVERRIDES", "WINEDEBUG", "WINELOGFILE", "WINESERVER", "WINELOADER", "WINEDLLPATH", "WINEBIN"]:
-                        value = data["inputs"][option].get_text().strip()
-                        if value:
-                            if option == "WINEDEBUG" and value == "-all":
-                                options.append("WINEDEBUG=-all")
-                            else:
-                                options.append(f"{option}={value}")
-                    if options:
-                        command.insert(0, " ".join(options))
-
-            # MangoHud
-            elif tab_name == "MangoHud":
-                active_toggles = any(toggle.get_active() for toggle in data["toggles"].values())
-                active_inputs = any(entry.get_text().strip() for entry in data["inputs"].values())
-                active_dropdowns = any(combo.get_active_text() for combo in data["dropdowns"].values())
-                if active_toggles or active_inputs or active_dropdowns:
-                    options = ["mangohud"]
-                    for option, toggle in data["toggles"].items():
-                        if toggle.get_active():
-                            options.append(f"{option}=1")
-                    for option in ["CONFIG", "FPSAVERAGE", "FPS_LIMIT", "FPS_THRESHOLD", "COLOR", "XOFFSET", "YOFFSET"]:
-                        value = data["inputs"][option].get_text().strip()
-                        if value:
-                            options.append(f"MANGOHUD_{option}={value}")
-                    align = data["dropdowns"]["ALIGN"].get_active_text()
-                    if align:
-                        options.append(f"MANGOHUD_ALIGN={align}")
-                    command.insert(0, " ".join(options))
-
-            # vkBasalt
-            elif tab_name == "vkBasalt":
-                active_toggles = any(toggle.get_active() for toggle in data["toggles"].values())
-                active_inputs = any(entry.get_text().strip() for entry in data["inputs"].values())
-                active_sliders = any(toggle.get_active() for toggle in data["slider_toggles"].values())
-                if active_toggles or active_inputs or active_sliders:
-                    options = ["vkbasalt"]
-                    for option, toggle in data["toggles"].items():
-                        if toggle.get_active():
-                            options.append(f"{option}=1")
-                    for option in ["CONFIG", "SHADERS"]:
-                        value = data["inputs"][option].get_text().strip()
-                        if value:
-                            options.append(f"VK_BASALT_{option}={value}")
-                    for option in TAB_CONFIGS[tab_name]["sliders"]:
-                        option_key = option[0]
-                        if data["slider_toggles"].get(option_key, Gtk.Switch()).get_active():
-                            _, slider = data["sliders"][option_key]
-                            value = slider.get_value()
-                            options.append(f"VK_BASALT_{option_key}={value}")
-                    command.insert(0, " ".join(options))
-
-            # GameMode
-            elif tab_name == "GameMode":
-                if data["toggles"]["GAME_MODE"].get_active():
-                    command.insert(0, "gamemoderun")
-
-            # Gamescope
-            elif tab_name == "Gamescope":
-                active_toggles = any(toggle.get_active() for toggle in data["toggles"].values())
-                active_inputs = any(entry.get_text().strip() for entry in data["inputs"].values())
-                active_dropdowns = any(combo.get_active_text() != "None" for combo in data["dropdowns"].values())
-                if active_toggles or active_inputs or active_dropdowns:
-                    options = ["gamescope"]
-                    for option, toggle in data["toggles"].items():
-                        if toggle.get_active():
-                            options.append(f"-{option}")
-                    for option in ["W", "H", "r", "s", "t", "d", "p", "x", "y"]:
-                        value = data["inputs"][option].get_text().strip()
-                        if value:
-                            options.append(f"-{option} {value}")
-                    input_type = data["dropdowns"]["inputs"].get_active_text()
-                    if input_type != "None":
-                        if input_type in ["Keyboard", "All"]:
-                            options.append("-k")
-                        if input_type in ["Mouse", "All"]:
-                            options.append("-m")
-                        if input_type in ["Gamepad", "All"]:
-                            options.append("-g")
-                    command.insert(0, " ".join(options))
-
-            # DXVK
-            elif tab_name == "DXVK":
-                active_toggles = any(toggle.get_active() for toggle in data["toggles"].values())
-                active_inputs = any(entry.get_text().strip() for entry in data["inputs"].values())
-                if active_toggles or active_inputs:
-                    options = []
-                    for option, toggle in data["toggles"].items():
-                        if toggle.get_active():
-                            options.append(f"{option}=1")
-                    for option in [
-                        "HUD", "STATE_CACHE_PATH", "SHADER_CACHE_PATH", "LOG_LEVEL",
-                        "MAX_FRAME_LATENCY", "MAX_FRAMES_IN_FLIGHT", "FORCE_FEATURE_LEVEL",
-                        "SHADER_MODEL", "MAX_SHADER_RESOURCE_GROUPS"
-                    ]:
-                        value = data["inputs"][option].get_text().strip()
-                        if value:
-                            options.append(f"DXVK_{option}={value}")
-                    if options:
-                        command.insert(0, " ".join(options))
-
-            # ProtonCustom
-            elif tab_name == "ProtonCustom":
-                active_toggles = any(toggle.get_active() for toggle in data["toggles"].values())
-                active_inputs = any(entry.get_text().strip() for entry in data["inputs"].values())
-                if active_toggles or active_inputs:
-                    options = []
-                    for option, toggle in data["toggles"].items():
-                        if toggle.get_active():
-                            options.append(f"{option}=1")
-                    for option in ["LOG_FILE", "USE_WINEDEBUG"]:
-                        value = data["inputs"][option].get_text().strip()
-                        if value:
-                            options.append(f"PROTON_{option}={value}")
-                    if options:
-                        command.insert(0, " ".join(options))
-
-            # MesaOverlay
-            elif tab_name == "MesaOverlay":
-                active_toggles = any(toggle.get_active() for toggle in data["toggles"].values())
-                active_inputs = any(entry.get_text().strip() for entry in data["inputs"].values())
-                active_dropdowns = any(combo.get_active_text() for combo in data["dropdowns"].values())
-                if active_toggles or active_inputs or active_dropdowns:
-                    options = []
-                    for option, toggle in data["toggles"].items():
-                        if toggle.get_active():
-                            options.append(f"{option}=1")
-                    for option in ["CONFIG", "XOFFSET", "YOFFSET", "COLOR", "FONT_SIZE", "LOG_FILE", "Transparency"]:
-                        value = data["inputs"][option].get_text().strip()
-                        if value:
-                            option_key = "TRANSPARENCY" if option == "Transparency" else option
-                            options.append(f"MESA_OVERLAY_{option_key}={value}")
-                    align = data["dropdowns"]["ALIGN"].get_active_text()
-                    if align:
-                        options.append(f"MESA_OVERLAY_ALIGN={align}")
-                    if options:
-                        command.insert(0, " ".join(options))
-
-        # Add custom arguments
-        custom_args = self.args_entry.get_text().strip()
-        if custom_args:
-            command.append(custom_args)
-
-        # Generate the final command
-        final_command = " ".join(command) + " %command%" if command else "%command%"
-
-        dialog = Gtk.Dialog(
-            title="Launch Command",
-            transient_for=self,
-            flags=0,
-            border_width=10
-        )
-        dialog.set_default_size(600, 150)
-
-        content_area = dialog.get_content_area()
-        vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
-        content_area.add(vbox)
-
-        label = Gtk.Label(label="Launch Command (select to copy):")
-        vbox.pack_start(label, False, False, 0)
-
-        textview = Gtk.TextView()
-        textview.set_editable(False)
-        textview.set_wrap_mode(Gtk.WrapMode.WORD)
-        textbuffer = textview.get_buffer()
-        textbuffer.set_text(final_command)
-        scrolled_window = Gtk.ScrolledWindow()
-        scrolled_window.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
-        scrolled_window.add(textview)
-        scrolled_window.set_min_content_height(50)
-        vbox.pack_start(scrolled_window, True, True, 0)
-
-        hbox_buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
-        vbox.pack_start(hbox_buttons, False, False, 0)
-
-        copy_button = Gtk.Button(label="Copy to Clipboard")
-        copy_button.connect("clicked", lambda btn: Gdk.Clipboard.get(Gdk.SELECTION_CLIPBOARD).set_text(final_command, -1))
-        hbox_buttons.pack_start(copy_button, True, True, 0)
-
-        ok_button = Gtk.Button(label="OK")
-        ok_button.connect("clicked", lambda btn: dialog.destroy())
-        hbox_buttons.pack_start(ok_button, True, True, 0)
-
-        dialog.show_all()
-
-    def on_cancel_clicked(self, button):
-        self.save_settings()
+    # Handle window closing
+    def on_destroy(self, widget):
+        logging.info("Steam Launcher application closed.")
         Gtk.main_quit()
 
+    # SECTION: SETTINGS LOADING
+    def load_settings(self):
+        """Loads settings from the settings file and updates the UI."""
+        try:
+            if os.path.exists(SETTINGS_FILE):
+                with open(SETTINGS_FILE, "r") as f:
+                    settings = json.load(f)
+
+                # Load General tab settings
+                general_settings = settings.get("general", {})
+                for flag, value in general_settings.items():
+                    if flag in self.toggles:
+                        self.toggles[flag].set_active(value)
+                    elif flag in self.inputs:
+                        self.inputs[flag].set_text(value)
+                    elif flag in self.general_dropdowns:
+                        combo = self.general_dropdowns[flag]
+                        model = combo.get_model()
+                        for i, row in enumerate(model):
+                            if row[0] == value:
+                                combo.set_active(i)
+                                break
+
+                # Load Tab settings
+                tabs_settings = settings.get("tabs", {})
+                for tab_name, tab_settings in tabs_settings.items():
+                    if tab_name in self.tab_data:
+                        data = self.tab_data[tab_name]
+                        if "enabled" in tab_settings and data["enable_toggle"]:
+                            data["enable_toggle"].set_active(tab_settings["enabled"])
+                            data["content_box"].set_sensitive(tab_settings["enabled"])
+
+                        for key, value in tab_settings.get("toggles", {}).items():
+                            if key in data["toggles"]:
+                                data["toggles"][key].set_active(value)
+                        for key, value in tab_settings.get("inputs", {}).items():
+                            if key in data["inputs"]:
+                                data["inputs"][key].set_text(value)
+                        for key, value in tab_settings.get("dropdowns", {}).items():
+                            if key in data["dropdowns"]:
+                                combo = data["dropdowns"][key]
+                                model = combo.get_model()
+                                for i, row in enumerate(model):
+                                    if row[0] == value:
+                                        combo.set_active(i)
+                                        break
+                        for key, value in tab_settings.get("sliders", {}).items():
+                            if key in data["sliders"]:
+                                data["sliders"][key].set_value(value)
+                                # Update the value label
+                                slider = data["sliders"][key]
+                                if isinstance(slider.get_parent(), Gtk.Box) and len(slider.get_parent().get_children()) > 1:
+                                    value_label = slider.get_parent().get_children()[1]
+                                    if isinstance(value_label, Gtk.Label):
+                                        value_label.set_text(f"{value:.2f}")
+
+                logging.info("Settings loaded successfully.")
+            else:
+                logging.info("No settings file found, using defaults.")
+        except Exception as e:
+            logging.error(f"Failed to load settings: {e}")
+            self.show_error_dialog("Load Error", f"Could not load settings.\nError: {e}")
+
+# SECTION: MAIN APPLICATION ENTRY POINT
 def main():
-    window = SteamLauncherWindow()
-    window.connect("destroy", Gtk.main_quit)
-    window.show_all()
+    win = SteamLauncherWindow()
+    win.show_all()
     Gtk.main()
 
 if __name__ == "__main__":
