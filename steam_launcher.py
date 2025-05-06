@@ -1,3 +1,4 @@
+print("Starting Steam Launcher...")
 # Import necessary libraries
 import gi
 # Ensure Gtk 3.0 is available
@@ -19,6 +20,7 @@ import shlex  # For parsing custom arguments
 import pexpect  # User's original code uses pexpect for sudo password
 import logging  # For debugging
 from collections import defaultdict
+import uuid
 
 # SECTION: CONSTANTS
 SETTINGS_FILE = "steam_launcher_settings.json"
@@ -411,7 +413,7 @@ GENERAL_OPTIONS = [
 GENERAL_INPUTS = [
     ("-width", "Sets the window width", "e.g., 1920"),
     ("-height", "Sets the window height", "e.g., 1080"),
-    ("-dxlevel", "Sets the DirectX level", "e.g., 95"),
+    ("-dxlevel", "Sets the DirectX level", "e.g., 95"),  # Handled specially with toggle
     ("-particles", "Sets the particle effect quality", "e.g., 1"),
     ("-refresh", "Sets the refresh rate", "e.g., 60"),
     ("-heapsize", "Sets heapsize in KB", "e.g., 524288"),
@@ -431,153 +433,164 @@ class SteamLauncherWindow(Gtk.Window):
     # SECTION: INITIALIZATION
     # Initialize the main window and set up UI components
     def __init__(self):
-        super().__init__(title="Steam Game Launcher")
-        self.set_border_width(10)
-        self.set_default_size(1000, 700)
+        try:
+            super().__init__(title="Steam Game Launcher")
+            print("Initializing Steam Launcher...")
+            self.set_border_width(10)
+            self.set_default_size(1000, 700)
 
-        # Main vertical box to hold all content
-        vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
-        self.add(vbox)
+            # Main vertical box to hold all content
+            vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+            self.add(vbox)
 
-        # Header label with title and description
-        header = Gtk.Label(label="Steam Launch Options\nCustomize your game launch command with tabs for overlays and enhancements")
-        header.set_justify(Gtk.Justification.CENTER)
-        vbox.pack_start(header, False, False, 0)
+            # Header label with title and description
+            header = Gtk.Label(label="Steam Launch Options\nCustomize your game launch command with tabs for overlays and enhancements")
+            header.set_justify(Gtk.Justification.CENTER)
+            vbox.pack_start(header, False, False, 0)
 
-        # --- Detect Section ---
-        hbox_detect = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        vbox.pack_start(hbox_detect, False, False, 5)
-        detect_label = Gtk.Label(label="Paste Command:")
-        hbox_detect.pack_start(detect_label, False, False, 0)
-        self.detect_entry = Gtk.Entry()
-        self.detect_entry.set_placeholder_text("Paste existing Steam launch options here (e.g., ENV_VAR=value command -flag --arg value %command%)")
-        self.detect_entry.set_hexpand(True)
-        hbox_detect.pack_start(self.detect_entry, True, True, 0)
-        detect_button = Gtk.Button(label="Parse Command")
-        detect_button.connect("clicked", self.on_detect_clicked)
-        hbox_detect.pack_start(detect_button, False, False, 0)
+            # --- Detect Section ---
+            hbox_detect = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+            vbox.pack_start(hbox_detect, False, False, 5)
+            detect_label = Gtk.Label(label="Paste Command:")
+            hbox_detect.pack_start(detect_label, False, False, 0)
+            self.detect_entry = Gtk.Entry()
+            self.detect_entry.set_placeholder_text("Paste existing Steam launch options here (e.g., ENV_VAR=value command -flag --arg value %command%)")
+            self.detect_entry.set_hexpand(True)
+            hbox_detect.pack_start(self.detect_entry, True, True, 0)
+            detect_button = Gtk.Button(label="Parse Command")
+            detect_button.connect("clicked", self.on_detect_clicked)
+            hbox_detect.pack_start(detect_button, False, False, 0)
 
-        # Notebook to manage multiple tabs
-        self.notebook = Gtk.Notebook()
-        vbox.pack_start(self.notebook, True, True, 0)
+            # Notebook to manage multiple tabs
+            self.notebook = Gtk.Notebook()
+            vbox.pack_start(self.notebook, True, True, 0)
 
-        # Tab 1: General Steam Options
-        self.toggles = {}  # Store toggle switches for General tab
-        self.inputs = {}   # Store input entries for General tab
-        self.general_dropdowns = {}  # Store general dropdowns (like dxlevel)
-        self.setup_general_tab(self.notebook)
+            # Tab 1: General Steam Options
+            self.toggles = {}  # Store toggle switches for General tab
+            self.inputs = {}   # Store input entries for General tab
+            self.general_dropdowns = {}  # Store general dropdowns (like dxlevel)
+            self.dxlevel_toggle = None  # Store dxlevel enable toggle
+            self.setup_general_tab(self.notebook)
 
-        # Track which tabs have been checked for software
-        self.software_checked = {tab: False for tab in TAB_CONFIGS if "software_requirement" in TAB_CONFIGS[tab]}
+            # Track which tabs have been checked for software
+            self.software_checked = {tab: False for tab in TAB_CONFIGS if "software_requirement" in TAB_CONFIGS[tab]}
 
-        # Setup tabs for overlay/enhancement tools
-        self.tab_data = defaultdict(lambda: {
-            "toggles": {},
-            "inputs": {},
-            "dropdowns": {},
-            "sliders": {},
-            "slider_values": {},
-            "content_box": None,
-            "enable_toggle": None
-        })
-        for tab_name in TAB_CONFIGS:
-            self.setup_tab(self.notebook, tab_name)
+            # Setup tabs for overlay/enhancement tools
+            self.tab_data = defaultdict(lambda: {
+                "toggles": {},
+                "inputs": {},
+                "dropdowns": {},
+                "sliders": {},
+                "slider_values": {},
+                "content_box": None,
+                "enable_toggle": None,
+                "install_button": None
+            })
+            for tab_name in TAB_CONFIGS:
+                self.setup_tab(self.notebook, tab_name)
 
-        # Connect tab switch signal to check software
-        self.notebook.connect("switch-page", self.on_tab_switched)
+            # Connect tab switch signal (no longer checking software on switch)
+            self.notebook.connect("switch-page", self.on_tab_switched)
 
-        # Create mappings for detection
-        # Defer building mappings and loading settings until UI is fully built
-        GLib.idle_add(self.build_detection_mappings)
-        GLib.idle_add(self.load_settings)
+            # Create mappings for detection
+            # Defer building mappings and loading settings until UI is fully built
+            GLib.idle_add(self.build_detection_mappings)
+            GLib.idle_add(self.load_settings)
 
-        # Buttons at the bottom
-        hbox_buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
-        vbox.pack_start(hbox_buttons, False, False, 0)
+            # Buttons at the bottom
+            hbox_buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+            vbox.pack_start(hbox_buttons, False, False, 0)
 
-        save_button = Gtk.Button(label="Save Settings")
-        save_button.connect("clicked", self.on_save_clicked)
-        hbox_buttons.pack_start(save_button, True, True, 0)
+            save_button = Gtk.Button(label="Save Settings")
+            save_button.connect("clicked", self.on_save_clicked)
+            hbox_buttons.pack_start(save_button, True, True, 0)
 
-        launch_button = Gtk.Button(label="Generate Launch Command")
-        launch_button.connect("clicked", self.on_launch_clicked)
-        hbox_buttons.pack_start(launch_button, True, True, 0)
+            reset_button = Gtk.Button(label="Reset All")
+            reset_button.connect("clicked", self.on_reset_clicked)
+            hbox_buttons.pack_start(reset_button, True, True, 0)
 
-        # --- Generated Command Output ---
-        hbox_output = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-        vbox.pack_start(hbox_output, False, False, 5)
-        output_label = Gtk.Label(label="Generated Command:")
-        output_label.set_xalign(0)
-        hbox_output.pack_start(output_label, False, False, 0)
-        self.generated_command_entry = Gtk.Entry()
-        self.generated_command_entry.set_placeholder_text("Generated launch command will appear here")
-        self.generated_command_entry.set_editable(False)
-        self.generated_command_entry.set_hexpand(True)
-        hbox_output.pack_start(self.generated_command_entry, True, True, 0)
+            launch_button = Gtk.Button(label="Generate Launch Command")
+            launch_button.connect("clicked", self.on_launch_clicked)
+            hbox_buttons.pack_start(launch_button, True, True, 0)
 
-        # Styling for better readability
-        css = """
-        window, dialog {
-            background-color: #353535;
-        }
-        label, button {
-            color: #e0e0e0;
-        }
-        button {
-            background-color: #4a4a4a;
-            border: 1px solid #707070;
-            border-radius: 5px;
-        }
-        button:hover {
-            background-color: #606060;
-        }
-        entry, textview text {
-            background-color: #404040;
-            color: #e0e0e0;
-            border: 1px solid #707070;
-            border-radius: 5px;
-        }
-        switch {
-            background-color: #404040;
-        }
-        switch slider {
-            background-color: #808080;
-            border-radius: 10px;
-        }
-        switch:checked slider {
-            background-color: #00aaff;
-        }
-        tooltip {
-            background-color: #000000;
-            color: #ffffff;
-            border: 1px solid #a0a0a0;
-            border-radius: 5px;
-            padding: 4px;
-        }
-        .enable-label {
-            font-weight: bold;
-            font-size: 14px;
-            color: #00aaff;
-        }
-        .vkbasalt-grid {
-            margin: 10px;
-            padding: 10px;
-        }
-        .vkbasalt-slider-box {
-            margin: 5px 0;
-            padding: 5px;
-        }
-        """
-        css_provider = Gtk.CssProvider()
-        css_provider.load_from_data(css.encode())
-        Gtk.StyleContext.add_provider_for_screen(
-            Gdk.Screen.get_default(),
-            css_provider,
-            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
-        )
+            # --- Generated Command Output ---
+            hbox_output = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+            vbox.pack_start(hbox_output, False, False, 5)
+            output_label = Gtk.Label(label="Generated Command:")
+            output_label.set_xalign(0)
+            hbox_output.pack_start(output_label, False, False, 0)
+            self.generated_command_entry = Gtk.Entry()
+            self.generated_command_entry.set_placeholder_text("Generated launch command will appear here")
+            self.generated_command_entry.set_editable(False)
+            self.generated_command_entry.set_hexpand(True)
+            hbox_output.pack_start(self.generated_command_entry, True, True, 0)
 
-        # Save settings on window close
-        self.connect("destroy", self.on_destroy)
+            # Styling for better readability
+            css = """
+            window, dialog {
+                background-color: #353535;
+            }
+            label, button {
+                color: #e0e0e0;
+            }
+            button {
+                background-color: #4a4a4a;
+                border: 1px solid #707070;
+                border-radius: 5px;
+            }
+            button:hover {
+                background-color: #606060;
+            }
+            entry, textview text {
+                background-color: #404040;
+                color: #e0e0e0;
+                border: 1px solid #707070;
+                border-radius: 5px;
+            }
+            switch {
+                background-color: #404040;
+            }
+            switch slider {
+                background-color: #808080;
+                border-radius: 10px;
+            }
+            switch:checked slider {
+                background-color: #00aaff;
+            }
+            tooltip {
+                background-color: #000000;
+                color: #ffffff;
+                border: 1px solid #a0a0a0;
+                border-radius: 5px;
+                padding: 4px;
+            }
+            .enable-label {
+                font-weight: bold;
+                font-size: 14px;
+                color: #00aaff;
+            }
+            .vkbasalt-grid {
+                margin: 10px;
+                padding: 10px;
+            }
+            .vkbasalt-slider-box {
+                margin: 5px 0;
+                padding: 5px;
+            }
+            """
+            css_provider = Gtk.CssProvider()
+            css_provider.load_from_data(css.encode())
+            Gtk.StyleContext.add_provider_for_screen(
+                Gdk.Screen.get_default(),
+                css_provider,
+                Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+            )
+
+            # Save settings on window close
+            self.connect("destroy", self.on_destroy)
+        except Exception as e:
+            print(f"Error initializing application: {e}")
+            raise
 
     # SECTION: UI SETUP HELPERS
     def _create_toggle(self, label, tooltip):
@@ -705,11 +718,21 @@ class SteamLauncherWindow(Gtk.Window):
         row = 0
         for flag, label, placeholder in GENERAL_INPUTS:
             if flag == "-dxlevel":
+                # Create toggle for enabling/disabling dxlevel
+                dx_toggle_hbox, dx_toggle = self._create_toggle("Enable DirectX Level", f"Enable DirectX Level ({flag})")
+                self.dxlevel_toggle = dx_toggle
+                inputs_grid.attach(dx_toggle_hbox, 0, row, 1, 1)
+                row += 1
+
+                # Create dropdown for dxlevel
                 dx_options = DX_LEVEL_PRESETS
                 dx_tooltip = f"{label} ({flag})"
                 hbox_dx, combo_dx = self._create_dropdown("DirectX Level", dx_options, None, dx_tooltip)
                 inputs_grid.attach(hbox_dx, 0, row, 1, 1)
                 self.general_dropdowns[flag] = combo_dx
+                # Initially disable dropdown unless toggle is active
+                hbox_dx.set_sensitive(False)
+                dx_toggle.connect("toggled", self.on_dxlevel_toggle, hbox_dx)
             else:
                 label_text = label
                 hbox, entry = self._create_input(label_text, f"{label} ({flag})", placeholder)
@@ -718,6 +741,12 @@ class SteamLauncherWindow(Gtk.Window):
             row += 1
 
         notebook.append_page(scrolled_window, Gtk.Label(label="General"))
+
+    def on_dxlevel_toggle(self, toggle, dxlevel_hbox):
+        """Enable or disable the dxlevel dropdown based on toggle state."""
+        is_active = toggle.get_active()
+        dxlevel_hbox.set_sensitive(is_active)
+        logging.debug(f"DirectX Level dropdown sensitivity set to {is_active}")
 
     # Setup a tab for a specific tool (e.g., Wine, MangoHud)
     def setup_tab(self, notebook, tab_name):
@@ -744,6 +773,19 @@ class SteamLauncherWindow(Gtk.Window):
         tab_vbox.pack_start(content_box, True, True, 0)
         self.tab_data[tab_name]['content_box'] = content_box
         enable_toggle.connect("toggled", self.on_enable_toggle, tab_name)
+
+        # Install Software Button (except for vkBasalt)
+        if "software_requirement" in config and config["software_requirement"] != "vkbasalt":
+            software = config["software_requirement"]
+            install_button = Gtk.Button(label=f"Install {software}")
+            install_button.set_tooltip_text(f"Install {software} using apt")
+            install_button.connect("clicked", self.on_install_software_clicked, tab_name, software)
+            content_box.pack_start(install_button, False, False, 0)
+            self.tab_data[tab_name]['install_button'] = install_button
+            # Check if software is installed and hide button if it is
+            if self.check_software(software):
+                install_button.set_visible(False)
+                self.software_checked[tab_name] = True
 
         # Set initial sensitivity based on toggle state
         content_box.set_sensitive(enable_toggle.get_active())
@@ -817,10 +859,6 @@ class SteamLauncherWindow(Gtk.Window):
                 self.tab_data[tab_name]['sliders'][option] = slider
 
         notebook.append_page(scrolled_window, Gtk.Label(label=tab_name))
-
-        # Check software requirement after tab is set up
-        if "software_requirement" in config:
-            GLib.idle_add(self.check_software_and_prompt, tab_name, config["software_requirement"])
 
     # SECTION: DETECTION MAPPINGS
     # Create mappings to link command parts/env vars to GUI elements
@@ -935,18 +973,14 @@ class SteamLauncherWindow(Gtk.Window):
         if tab_name in self.tab_data and self.tab_data[tab_name]['content_box']:
             self.tab_data[tab_name]['content_box'].set_sensitive(is_active)
             logging.debug(f"Tab '{tab_name}' content sensitivity set to {is_active}")
-            if is_active and "software_requirement" in TAB_CONFIGS[tab_name]:
-                self.check_software_and_prompt(tab_name, TAB_CONFIGS[tab_name]["software_requirement"])
 
     def on_tab_switched(self, notebook, page, page_num):
-        """Check software requirement when switching to a tab."""
+        """Handle tab switching (no software checks here anymore)."""
         tab_widget = notebook.get_nth_page(page_num)
         tab_label_widget = notebook.get_tab_label(tab_widget)
         if tab_label_widget:
             tab_name = tab_label_widget.get_text()
-            if tab_name in TAB_CONFIGS and "software_requirement" in TAB_CONFIGS[tab_name]:
-                if not self.software_checked.get(tab_name, False):
-                    self.check_software_and_prompt(tab_name, TAB_CONFIGS[tab_name]["software_requirement"])
+            logging.debug(f"Switched to tab: {tab_name}")
 
     def on_save_clicked(self, widget):
         settings = {"general": {}, "tabs": {}}
@@ -958,6 +992,7 @@ class SteamLauncherWindow(Gtk.Window):
             settings["general"][flag] = entry.get_text()
         for flag, combo in self.general_dropdowns.items():
             settings["general"][flag] = combo.get_active_text()
+        settings["general"]["dxlevel_enabled"] = self.dxlevel_toggle.get_active()
 
         # Save Tab settings
         for tab_name, data in self.tab_data.items():
@@ -978,6 +1013,12 @@ class SteamLauncherWindow(Gtk.Window):
         except Exception as e:
             logging.error(f"Failed to save settings: {e}")
             self.show_error_dialog("Save Error", f"Could not save settings.\nError: {e}")
+
+    def on_reset_clicked(self, widget):
+        """Handle the Reset All button click."""
+        self.reset_uiarea()
+        logging.info("All settings reset to default.")
+        self.show_info_dialog("Settings Reset", "All options have been reset to their default states.")
 
     def on_launch_clicked(self, widget):
         command_parts = []
@@ -1061,10 +1102,12 @@ class SteamLauncherWindow(Gtk.Window):
             if value:
                 command_parts.extend([flag, shlex.quote(value)])
 
-        for flag, combo in self.general_dropdowns.items():
-            value = combo.get_active_text()
-            if value is not None:
-                command_parts.extend([flag, shlex.quote(value)])
+        # Only include dxlevel if toggle is active
+        if self.dxlevel_toggle.get_active():
+            for flag, combo in self.general_dropdowns.items():
+                value = combo.get_active_text()
+                if value is not None:
+                    command_parts.extend([flag, shlex.quote(value)])
 
         command_parts.append("%command%")
 
@@ -1214,6 +1257,8 @@ class SteamLauncherWindow(Gtk.Window):
                         index = options.index(value)
                         widget.set_active(index)
                         logging.debug(f"Matching general dropdown flag '{part}' with value '{value}'")
+                        if part == "-dxlevel":
+                            self.dxlevel_toggle.set_active(True)
                     except ValueError:
                         logging.warning(f"Value '{value}' not found in options for flag '{part}'")
                     i += 1
@@ -1251,6 +1296,7 @@ class SteamLauncherWindow(Gtk.Window):
                 combo.set_active(0)
             else:
                 combo.set_active(-1)
+        self.dxlevel_toggle.set_active(False)
 
         for tab_name, data in self.tab_data.items():
             if data["enable_toggle"]:
@@ -1279,206 +1325,186 @@ class SteamLauncherWindow(Gtk.Window):
         self.detect_entry.set_text("")
         logging.debug("UI reset complete.")
 
-    # SECTION: SOFTWARE CHECKING
-    def check_software_and_prompt(self, tab_name, requirement):
-        """Checks if required software exists and prompts the user if not, except for vkBasalt."""
-        if self.software_checked.get(tab_name, False):
-            logging.debug(f"Software '{requirement}' for tab '{tab_name}' already checked.")
-            return
-
-        logging.debug(f"Checking software requirement for '{tab_name}': {requirement}")
-        if self.check_software(requirement):
-            logging.info(f"Software '{requirement}' found.")
-            self.software_checked[tab_name] = True
-        else:
-            logging.warning(f"Software '{requirement}' not found in PATH.")
-            # Skip prompting for vkBasalt
-            if requirement == "vkbasalt":
-                logging.info("Skipping installation prompt for vkBasalt as per user request.")
-                self.software_checked[tab_name] = True
-                return
-            self.prompt_install(requirement)
-
+    # SECTION: SOFTWARE CHECKING AND INSTALLATION
     def check_software(self, software):
+        """Check if the specified software is installed."""
         try:
             subprocess.run(["which", software], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            logging.info(f"Software '{software}' found.")
             return True
         except subprocess.CalledProcessError:
+            logging.warning(f"Software '{software}' not found in PATH.")
             return False
 
-    # SECTION: SOFTWARE INSTALLATION PROMPT
-    def prompt_install(self, software):
+    def on_install_software_clicked(self, button, tab_name, software):
+        """Handle the Install Software button click."""
+        logging.debug(f"Install button clicked for software '{software}' in tab '{tab_name}'")
+
+        # Create password dialog
+        password_dialog = Gtk.Dialog(
+            title=f"Install {software}",
+            transient_for=self,
+            flags=Gtk.DialogFlags.MODAL | Gtk.DialogFlags.DESTROY_WITH_PARENT
+        )
+        password_dialog.add_buttons(
+            "_OK", Gtk.ResponseType.OK,
+            "_Cancel", Gtk.ResponseType.CANCEL
+        )
+
+        vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        vbox.set_border_width(10)
+        password_dialog.get_content_area().pack_start(vbox, True, True, 0)
+
+        label = Gtk.Label(label=f"Enter your sudo password to install {software}:")
+        vbox.pack_start(label, False, False, 0)
+        password_entry = Gtk.Entry()
+        password_entry.set_visibility(False)
+        password_entry.set_invisible_char("*")
+        vbox.pack_start(password_entry, False, False, 0)
+
+        password_dialog.show_all()
+        password_entry.grab_focus()
+
+        response = password_dialog.run()
+        password = password_entry.get_text() if response == Gtk.ResponseType.OK else ""
+        password_dialog.destroy()
+
+        if password:
+            try:
+                # Use pexpect to run the apt install command
+                cmd = f"sudo -S apt-get install -y {software}"
+                child = pexpect.spawn(cmd, encoding='utf-8', logfile=open(LOG_FILE, 'a'))
+                child.expect(['password', pexpect.EOF])
+                child.sendline(password)
+                child.expect(pexpect.EOF, timeout=300)
+                child.close()
+
+                if child.exitstatus == 0:
+                    logging.info(f"Successfully installed {software}")
+                    self.show_info_dialog("Installation Successful", f"{software} was installed successfully.")
+                    # Hide the install button
+                    if self.tab_data[tab_name]['install_button']:
+                        self.tab_data[tab_name]['install_button'].set_visible(False)
+                    self.software_checked[tab_name] = True
+                else:
+                    logging.error(f"Installation of {software} failed with exit status {child.exitstatus}")
+                    self.show_error_dialog("Installation Failed", f"Failed to install {software}. Check the log for details.")
+            except pexpect.exceptions.ExceptionPexpect as e:
+                logging.error(f"Error installing {software}: {e}")
+                self.show_error_dialog("Installation Error", f"Error installing {software}: {e}")
+        else:
+            logging.debug(f"Installation of {software} cancelled by user")
+            self.show_info_dialog("Installation Cancelled", f"Installation of {software} was cancelled.")
+
+    # SECTION: DIALOGS
+    def show_info_dialog(self, title, message):
         dialog = Gtk.MessageDialog(
             transient_for=self,
             flags=0,
-            message_type=Gtk.MessageType.QUESTION,
-            text=f"{software} is required but not found. Would you like to attempt to install it using apt?",
-            buttons=Gtk.ButtonsType.YES_NO
-        )
-        response = dialog.run()
-        dialog.destroy()
-
-        if response == Gtk.ResponseType.YES:
-            password_dialog = Gtk.Dialog(
-                title="Enter Password",
-                transient_for=self,
-                flags=Gtk.DialogFlags.MODAL | Gtk.DialogFlags.DESTROY_WITH_PARENT
-            )
-            password_dialog.add_buttons(
-                "_OK", Gtk.ResponseType.OK,
-                "_Cancel", Gtk.ResponseType.CANCEL
-            )
-
-            vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
-            vbox.set_border_width(10)
-            password_dialog.get_content_area().pack_start(vbox, True, True, 0)
-
-            label = Gtk.Label(label="Enter your password for sudo:")
-            vbox.pack_start(label, False, False, 0)
-            password_entry = Gtk.Entry()
-            password_entry.set_visibility(False)
-            password_entry.set_invisible_char("*")
-            vbox.pack_start(password_entry, False, False, 0)
-
-            password_dialog.show_all()
-            password_entry.grab_focus()
-
-            response = password_dialog.run()
-            password = password_entry.get_text() if response == Gtk.ResponseType.OK else ""
-            password_dialog.destroy()
-
-            if password:
-                try:
-                    cmd = f"sudo apt install -y {shlex.quote(software)}"
-                    logging.info(f"Attempting to install {software} with command: {cmd}")
-                    child = pexpect.spawn(cmd)
-                    i = child.expect(["[sudo] password for .*: ", pexpect.EOF, pexpect.TIMEOUT], timeout=60)
-                    if i == 0:
-                        child.sendline(password)
-                        child.expect(pexpect.EOF, timeout=300)
-                        output = child.before.decode('utf-8', errors='ignore')
-                        logging.debug(f"Installation output:\n{output}")
-
-                        if child.exitstatus == 0:
-                            self.show_info_dialog(f"{software} installed successfully!", output)
-                        else:
-                            error_message = f"Failed to install {software}.\nExit status: {child.exitstatus}\nOutput:\n{output}"
-                            logging.error(error_message)
-                            self.show_error_dialog(f"Installation Failed", error_message)
-                    else:
-                        error_message = f"Installation attempt failed or timed out. Is apt available and sudo configured correctly?\nOutput:\n{child.before.decode('utf-8', errors='ignore')}"
-                        logging.error(error_message)
-                        self.show_error_dialog("Installation Error", error_message)
-
-                except pexpect.exceptions.Exception as e:
-                    logging.error(f"pexpect error during installation: {e}")
-                    self.show_error_dialog("Installation Error", f"An error occurred during installation.\nError: {e}")
-                except Exception as e:
-                    logging.error(f"Unexpected error during installation: {e}")
-                    self.show_error_dialog("Installation Error", f"An unexpected error occurred during installation.\nError: {e}")
-
-                self.software_checked[software] = True
-
-    # SECTION: DIALOG HELPERS
-    def show_info_dialog(self, title, message):
-        """Shows an info dialog."""
-        dialog = Gtk.MessageDialog(
-            parent=self,
-            flags=Gtk.DialogFlags.MODAL | Gtk.DialogFlags.DESTROY_WITH_PARENT,
-            type=Gtk.MessageType.INFO,
+            message_type=Gtk.MessageType.INFO,
             buttons=Gtk.ButtonsType.OK,
-            message_format=title,
+            text=title,
         )
         dialog.format_secondary_text(message)
         dialog.run()
         dialog.destroy()
 
     def show_error_dialog(self, title, message):
-        """Shows an error dialog."""
         dialog = Gtk.MessageDialog(
-            parent=self,
-            flags=Gtk.DialogFlags.MODAL | Gtk.DialogFlags.DESTROY_WITH_PARENT,
-            type=Gtk.MessageType.ERROR,
-            buttons=Gtk.ButtonsType.CANCEL,
-            message_format=title,
+            transient_for=self,
+            flags=0,
+            message_type=Gtk.MessageType.ERROR,
+            buttons=Gtk.ButtonsType.OK,
+            text=title,
         )
         dialog.format_secondary_text(message)
         dialog.run()
         dialog.destroy()
 
-    # Handle window closing
-    def on_destroy(self, widget):
-        logging.info("Steam Launcher application closed.")
-        Gtk.main_quit()
-
     # SECTION: SETTINGS LOADING
     def load_settings(self):
-        """Loads settings from the settings file and updates the UI."""
         try:
-            if os.path.exists(SETTINGS_FILE):
-                with open(SETTINGS_FILE, "r") as f:
+            if os.path.exists("steam_launcher_settings.json"):
+                with open("steam_launcher_settings.json", "r") as f:
                     settings = json.load(f)
 
                 # Load General tab settings
-                general_settings = settings.get("general", {})
-                for flag, value in general_settings.items():
-                    if flag in self.toggles:
+                general = settings.get("general", {})
+                for flag, value in general.items():
+                    if flag == "dxlevel_enabled":
+                        self.dxlevel_toggle.set_active(value)
+                        if "-dxlevel" in self.general_dropdowns:
+                            self.general_dropdowns["-dxlevel"].get_parent().set_sensitive(value)
+                    elif flag in self.toggles:
                         self.toggles[flag].set_active(value)
                     elif flag in self.inputs:
-                        self.inputs[flag].set_text(value)
+                        self.inputs[flag].set_text(value or "")
                     elif flag in self.general_dropdowns:
                         combo = self.general_dropdowns[flag]
-                        model = combo.get_model()
-                        for i, row in enumerate(model):
-                            if row[0] == value:
-                                combo.set_active(i)
-                                break
+                        options = [combo.get_model()[i][0] for i in range(len(combo.get_model()))]
+                        try:
+                            if value in options:
+                                index = options.index(value)
+                                combo.set_active(index)
+                        except ValueError:
+                            pass
 
                 # Load Tab settings
-                tabs_settings = settings.get("tabs", {})
-                for tab_name, tab_settings in tabs_settings.items():
+                for tab_name, tab_settings in settings.get("tabs", {}).items():
                     if tab_name in self.tab_data:
                         data = self.tab_data[tab_name]
-                        if "enabled" in tab_settings and data["enable_toggle"]:
+                        if data["enable_toggle"] and "enabled" in tab_settings:
                             data["enable_toggle"].set_active(tab_settings["enabled"])
-                            data["content_box"].set_sensitive(tab_settings["enabled"])
+                            if data['content_box']:
+                                data['content_box'].set_sensitive(tab_settings["enabled"])
 
                         for key, value in tab_settings.get("toggles", {}).items():
                             if key in data["toggles"]:
                                 data["toggles"][key].set_active(value)
+
                         for key, value in tab_settings.get("inputs", {}).items():
                             if key in data["inputs"]:
-                                data["inputs"][key].set_text(value)
+                                data["inputs"][key].set_text(value or "")
+
                         for key, value in tab_settings.get("dropdowns", {}).items():
                             if key in data["dropdowns"]:
                                 combo = data["dropdowns"][key]
-                                model = combo.get_model()
-                                for i, row in enumerate(model):
-                                    if row[0] == value:
-                                        combo.set_active(i)
-                                        break
+                                options = [combo.get_model()[i][0] for i in range(len(combo.get_model()))]
+                                try:
+                                    if value in options:
+                                        index = options.index(value)
+                                        combo.set_active(index)
+                                except ValueError:
+                                    pass
+
                         for key, value in tab_settings.get("sliders", {}).items():
                             if key in data["sliders"]:
                                 data["sliders"][key].set_value(value)
-                                # Update the value label
-                                slider = data["sliders"][key]
-                                if isinstance(slider.get_parent(), Gtk.Box) and len(slider.get_parent().get_children()) > 1:
-                                    value_label = slider.get_parent().get_children()[1]
+                                if isinstance(data["sliders"][key].get_parent(), Gtk.Box) and len(data["sliders"][key].get_parent().get_children()) > 1:
+                                    value_label = data["sliders"][key].get_parent().get_children()[1]
                                     if isinstance(value_label, Gtk.Label):
                                         value_label.set_text(f"{value:.2f}")
 
                 logging.info("Settings loaded successfully.")
             else:
-                logging.info("No settings file found, using defaults.")
+                logging.info("No settings file found.")
         except Exception as e:
             logging.error(f"Failed to load settings: {e}")
             self.show_error_dialog("Load Error", f"Could not load settings.\nError: {e}")
 
-# SECTION: MAIN APPLICATION ENTRY POINT
+    def on_destroy(self, widget):
+        self.on_save_clicked(None)
+        Gtk.main_quit()
+
+# SECTION: MAIN FUNCTION
 def main():
-    win = SteamLauncherWindow()
-    win.show_all()
-    Gtk.main()
+    try:
+        win = SteamLauncherWindow()
+        win.show_all()
+        Gtk.main()
+    except Exception as e:
+        print(f"Error in main: {e}")
+        logging.error(f"Application failed to start: {e}")
 
 if __name__ == "__main__":
     main()
