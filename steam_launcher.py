@@ -422,9 +422,8 @@ GENERAL_INPUTS = [
 # SECTION: DX LEVEL PRESETS
 # Define preset options for DXLevel (expanded)
 DX_LEVEL_PRESETS = [
-    "80", "81", "90", "95", "98",
-    "9.0", "9.0c", "10.0", "10.1", "11.0",
-    "12.0",
+    "50", "70", "80", "81", "90", "95", "98",
+    "100", "110", "120",
 ]
 
 # SECTION: MAIN WINDOW CLASS
