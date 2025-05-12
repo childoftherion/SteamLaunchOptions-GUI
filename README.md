@@ -41,7 +41,7 @@ This tool helps you:
 
 1. Clone this repository:
    ```
-   git clone https://github.com/yourusername/SteamLaunchOptions-GUI.git
+   git clone https://github.com/childoftherion/SteamLaunchOptions-GUI.git
    ```
 
 2. Install the requirements:
