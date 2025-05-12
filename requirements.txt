@@ -1,0 +1,4 @@
+PyGObject>=3.40.0
+pexpect>=4.8.0
+setuptools>=42.0.0
+wheel>=0.37.0 
