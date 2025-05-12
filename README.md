@@ -39,6 +39,27 @@ This tool helps you:
 
 ## Installation
 
+### Recommended Method: Portable Script
+
+1. Clone this repository:
+   ```
+   git clone https://github.com/childoftherion/SteamLaunchOptions-GUI.git
+   ```
+
+2. Make the portable script executable:
+   ```
+   chmod +x RunPortable.sh
+   ```
+
+3. Run the application using the portable script:
+   ```
+   ./RunPortable.sh
+   ```
+
+The portable script automatically sets up a virtual environment, installs dependencies, and launches the application.
+
+### Alternative Method: Manual Installation
+
 1. Clone this repository:
    ```
    git clone https://github.com/childoftherion/SteamLaunchOptions-GUI.git
